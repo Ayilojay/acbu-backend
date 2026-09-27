@@ -23,9 +23,21 @@ jest.mock("../src/services/stellar/client", () => ({
   },
 }));
 
-jest.mock("../src/services/stellar/feeManager", () => ({
-  getBaseFee: jest.fn().mockResolvedValue("100"),
-}));
+jest.mock("../src/services/stellar/feeManager", () => {
+  // Mirrors the real strategy: a flat network base fee of 100 stroops, priced
+  // with the default 20% surge buffer and no ceiling clamping.
+  const quote = {
+    feeStroops: 120,
+    networkFeeStroops: 100,
+    buffered: true,
+    clampedToCeiling: false,
+    maxFeeStroops: 1000000,
+  };
+  return {
+    getBaseFee: jest.fn().mockResolvedValue("100"),
+    getPaymentFee: jest.fn().mockResolvedValue(quote),
+  };
+});
 
 // Mock the Stellar SDK so TransactionBuilder/Keypair/Operation don't hit real crypto.
 // All mock state is self-contained inside the factory — jest.mock is hoisted before
@@ -34,6 +46,8 @@ jest.mock("@stellar/stellar-sdk", () => {
   const mockTx = { sign: jest.fn() };
   const mockBuilder = {
     addOperation: jest.fn().mockReturnThis(),
+    // SDK 15 requires an explicit TimeBounds on every built transaction.
+    setTimeout: jest.fn().mockReturnThis(),
     build: jest.fn().mockReturnValue(mockTx),
   };
   return {
@@ -319,6 +333,10 @@ describe("createTransfer", () => {
         data: expect.objectContaining({ status: "completed", blockchainTxHash: "stellar-tx-hash" }),
       }),
     );
+    // SDK 15 rejects a build() without TimeBounds, so the payment must set one.
+    const { TransactionBuilder } = jest.requireMock("@stellar/stellar-sdk");
+    const builder = TransactionBuilder.mock.results[0].value;
+    expect(builder.setTimeout).toHaveBeenCalledWith(60);
   });
 
   // ── getSenderSigningKey: Stellar submission fails ────────────────────────────

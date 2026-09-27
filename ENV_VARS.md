@@ -124,9 +124,16 @@ This file documents the environment variables required by the ACBU backend and t
 - `TESTNET_CUSTODIAL_BOOTSTRAP`
 - `WALLET_ACTIVATION_AMOUNT` / `WALLET_ACTIVATION_NATIVE` / `WALLET_ACTIVATION_XLM` / `STELLAR_MIN_BALANCE`
 - `STELLAR_BASE_FEE_STROOPS` - defaults to `100`
-- `STELLAR_USE_DYNAMIC_FEES`
+- `STELLAR_USE_DYNAMIC_FEES` - defaults to `false`; when `true`, reads the live
+  base fee from Horizon for each payment instead of trusting `STELLAR_BASE_FEE_STROOPS`
 - `STELLAR_SOROBAN_MIN_FEE_STROOPS` - defaults to `5000`
 - `STELLAR_SOROBAN_MAX_FEE_STROOPS` - defaults to `10000000`
+- `STELLAR_FEE_SURGE_BUFFER_BPS` - defaults to `2000` (20%); buffer added on top of
+  the live base fee for classic payments, `0`–`10000` bps. See AB-052.
+- `STELLAR_MAX_PAYMENT_FEE_STROOPS` - defaults to `1000000`; hard ceiling on the
+  fee of a single classic payment. If the live base fee plus buffer exceeds this,
+  the payment fails with a `STELLAR_FEE_SURGE` (HTTP 503) instead of paying an
+  unbounded fee. See AB-052.
 - `USDC_ISSUER_TESTNET`
 - `USDC_ISSUER_MAINNET`
 - `USDC_ASSET_CODE_TESTNET` - defaults to `USDC`

@@ -82,6 +82,33 @@ const envSchema = z.object({
   CORS_ORIGIN: z.string().optional(),
   CDN_URL: z.string().url().optional(),
 
+  // AB-052 (#1002): Stellar fee configuration. These were read by
+  // `config.stellar.*` but never declared here, so Zod stripped them from
+  // `parsed.data` and every consumer observed `undefined` — `getBaseFee()`
+  // returned the literal string "undefined" whenever dynamic fees were off
+  // (the default) and `TransactionBuilder.build()` then threw
+  // "[BigNumber Error] Not a number: undefined". The documented defaults in
+  // ENV_VARS.md were never actually applied. Same class of bug as AB-045.
+  /** Base transaction fee in stroops used as fallback when dynamic fetch is disabled or fails. */
+  STELLAR_BASE_FEE_STROOPS: z.coerce.number().int().positive().default(100),
+  /** Minimum total fee per Soroban transaction in stroops, to prevent underpricing. */
+  STELLAR_SOROBAN_MIN_FEE_STROOPS: z.coerce.number().int().positive().default(5000),
+  /** Maximum total fee per Soroban transaction in stroops (base + resource fees). */
+  STELLAR_SOROBAN_MAX_FEE_STROOPS: z.coerce.number().int().positive().default(10_000_000),
+  // AB-052: surge buffer + ceiling for classic (non-Soroban) payment fees. The
+  // buffer is applied on top of the live network base fee so a fee increase
+  // between building and submitting a payment does not reject the transaction.
+  /** Buffer added on top of the live base fee, in basis points. Default 2000 = +20%. */
+  STELLAR_FEE_SURGE_BUFFER_BPS: z.coerce.number().int().min(0).max(10_000).default(2000),
+  /** Hard ceiling for a single payment fee, in stroops. Default 1,000,000 = 0.1 XLM. */
+  STELLAR_MAX_PAYMENT_FEE_STROOPS: z.coerce.number().int().positive().default(1_000_000),
+  /** When true, the base fee is read live from Horizon instead of using STELLAR_BASE_FEE_STROOPS. */
+  STELLAR_USE_DYNAMIC_FEES: z
+    .string()
+    .toLowerCase()
+    .pipe(z.enum(["true", "false"]))
+    .default("false"),
+
   // B-063 / AB-025: Fail-open controls for OpenAI degradation scenarios.
   // Defaults to "false" (fail-closed) so KYC/moderation checks reject unverified requests during degradation.
   OPENAI_FAIL_OPEN_ENABLED: z
@@ -491,6 +518,10 @@ export const config = {
     sorobanMaxFeeStroops: env.STELLAR_SOROBAN_MAX_FEE_STROOPS,
     /** Minimum total fee per Soroban transaction in stroops to prevent underpricing. Default 5000 stroops. */
     sorobanMinFeeStroops: env.STELLAR_SOROBAN_MIN_FEE_STROOPS,
+    /** AB-052: buffer (bps) added on top of the live base fee for classic payments. */
+    feeSurgeBufferBps: env.STELLAR_FEE_SURGE_BUFFER_BPS,
+    /** AB-052: hard ceiling (stroops) for a single classic payment fee. */
+    maxPaymentFeeStroops: env.STELLAR_MAX_PAYMENT_FEE_STROOPS,
     /** Circle USDC issuer on Stellar testnet, configured via the environment. */
     usdcIssuerTestnet: env.USDC_ISSUER_TESTNET,
     /** Circle USDC issuer on Stellar mainnet, configured via the environment. */
