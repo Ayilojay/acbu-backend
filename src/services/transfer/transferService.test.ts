@@ -157,6 +157,26 @@ async function submitTransfer() {
   );
 }
 
+/**
+ * Drive createTransfer and return whatever it rejected with, or null if it
+ * resolved. Used for the fee-surge path, which now rethrows a 503 to the caller.
+ */
+async function rejectionFromTransfer(): Promise<unknown> {
+  try {
+    await submitTransfer();
+  } catch (err) {
+    return err;
+  }
+  return null;
+}
+
+/** The `status` values written to the Transaction row. */
+function statusUpdates(): string[] {
+  return (mockTx.update as jest.Mock).mock.calls
+    .map((call) => (call[0] as { data?: { status?: string } })?.data?.status)
+    .filter((s): s is string => typeof s === "string");
+}
+
 /** The structured fields logged for a failed submission. */
 function failureLog() {
   return (logger.error as jest.Mock).mock.calls.find(
@@ -272,9 +292,13 @@ describe("Stellar payment fee re-validation (AB-052)", () => {
     // Network base fee is above the ceiling, so no affordable transaction can succeed.
     mockGetPaymentFee.mockResolvedValue(quoteFor(MAX_PAYMENT_FEE_STROOPS + 1));
 
-    const result = await submitTransfer();
+    const error = (await rejectionFromTransfer()) as StellarFeeSurgeError;
 
-    expect(result.status).toBe("failed");
+    // A fee surge reaches the caller as a 503 rather than a silent "failed".
+    expect(error).toBeInstanceOf(StellarFeeSurgeError);
+    expect(error.code).toBe("STELLAR_FEE_SURGE");
+    expect(error.statusCode).toBe(503);
+    expect(error.detectedBy).toBe("fee_pricing");
     // Never even attempted: submitting could only produce a rejection.
     expect(submitTransaction).not.toHaveBeenCalled();
     // And it is a fee surge, not some incidental build/serialisation failure.
@@ -282,10 +306,23 @@ describe("Stellar payment fee re-validation (AB-052)", () => {
     expect(failureLog()).toMatchObject({ detectedBy: "fee_pricing" });
   });
 
+  it("marks the transaction failed before rethrowing a fee surge", async () => {
+    mockGetPaymentFee.mockResolvedValue(quoteFor(MAX_PAYMENT_FEE_STROOPS + 1));
+
+    await rejectionFromTransfer();
+
+    // The record must be consistent before the throw: a rethrow that skipped
+    // this would leave the row stuck in 'pending' forever.
+    expect(statusUpdates()).toEqual(["failed"]);
+    expect(logFinancialEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "transfer.failed" }),
+    );
+  });
+
   it("reports the fee ceiling failure as STELLAR_FEE_SURGE with the live network fee", async () => {
     mockGetPaymentFee.mockResolvedValue(quoteFor(MAX_PAYMENT_FEE_STROOPS + 1));
 
-    await submitTransfer();
+    await rejectionFromTransfer();
 
     const log = failureLog();
     expect(log).toMatchObject({
@@ -302,7 +339,7 @@ describe("Stellar payment fee re-validation (AB-052)", () => {
   it("emits transfer.failed with the STELLAR_FEE_SURGE error code on a ceiling breach", async () => {
     mockGetPaymentFee.mockResolvedValue(quoteFor(MAX_PAYMENT_FEE_STROOPS + 1));
 
-    await submitTransfer();
+    await rejectionFromTransfer();
 
     expect(logFinancialEvent).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -318,9 +355,10 @@ describe("Stellar payment fee re-validation (AB-052)", () => {
     mockGetPaymentFee.mockResolvedValue(quoteFor(100));
     mockGetBaseFee.mockResolvedValue("5000");
 
-    const result = await submitTransfer();
+    const error = (await rejectionFromTransfer()) as StellarFeeSurgeError;
 
-    expect(result.status).toBe("failed");
+    expect(error).toBeInstanceOf(StellarFeeSurgeError);
+    expect(error.detectedBy).toBe("pre_submission_check");
     expect(submitTransaction).not.toHaveBeenCalled();
     // Bounded work: one account load + one build per allowed attempt.
     expect(loadAccount).toHaveBeenCalledTimes(3);
@@ -372,25 +410,27 @@ describe("Stellar payment fee re-validation (AB-052)", () => {
       { error: horizonInsufficientFeeError() },
     ];
 
-    const result = await submitTransfer();
+    const thrown = (await rejectionFromTransfer()) as StellarFeeSurgeError;
 
-    expect(result.status).toBe("failed");
     // Repriced and retried up to the attempt limit before giving up.
     expect(submitTransaction).toHaveBeenCalledTimes(3);
-
-    const error = failureLog()?.error as StellarFeeSurgeError;
-    expect(error).toBeInstanceOf(StellarFeeSurgeError);
-    expect(error.code).toBe("STELLAR_FEE_SURGE");
-    expect(error.statusCode).toBe(503);
-    expect(error.isOperational).toBe(true);
-    expect(error.detectedBy).toBe("horizon_rejection");
-    expect(error.transactionFeeStroops).toBe(120);
-    expect(error.maxFeeStroops).toBe(MAX_PAYMENT_FEE_STROOPS);
-    expect(error.details).toMatchObject({
+    // Retrying is pointless for the caller once the surge survives 3 attempts,
+    // so the retryable-but-persistent condition is surfaced as a 503.
+    expect(thrown).toBeInstanceOf(StellarFeeSurgeError);
+    expect(thrown.code).toBe("STELLAR_FEE_SURGE");
+    expect(thrown.statusCode).toBe(503);
+    expect(thrown.isOperational).toBe(true);
+    expect(thrown.detectedBy).toBe("horizon_rejection");
+    expect(thrown.transactionFeeStroops).toBe(120);
+    expect(thrown.maxFeeStroops).toBe(MAX_PAYMENT_FEE_STROOPS);
+    expect(thrown.details).toMatchObject({
       detectedBy: "horizon_rejection",
       transactionFeeStroops: 120,
       maxFeeStroops: MAX_PAYMENT_FEE_STROOPS,
     });
+    // The same error is recorded, so the audit trail matches what was thrown.
+    expect(failureLog()?.error).toBe(thrown);
+    expect(statusUpdates()).toEqual(["failed"]);
   });
 
   it("detects a fee rejection reported only in the error message", async () => {
@@ -449,11 +489,10 @@ describe("Stellar payment fee re-validation (AB-052)", () => {
     };
     submitQueue = [{ error: err }, { error: err }, { error: err }];
 
-    const result = await submitTransfer();
+    const thrown = await rejectionFromTransfer();
 
-    expect(result.status).toBe("failed");
+    expect(thrown).toBeInstanceOf(StellarFeeSurgeError);
     expect(submitTransaction).toHaveBeenCalledTimes(3);
-    expect(failureLog()?.error).toBeInstanceOf(StellarFeeSurgeError);
   });
 
   it("does not blame the fee when a fee-bump wrapper failed for another reason", async () => {
@@ -483,6 +522,8 @@ describe("Stellar payment fee re-validation (AB-052)", () => {
   it("propagates a non-fee submission failure without retrying", async () => {
     submitQueue = [{ error: new Error("Horizon unavailable") }];
 
+    // Resolves rather than throwing: only a fee surge is surfaced as a 503, so
+    // unrelated submission failures keep their existing `failed` result.
     const result = await submitTransfer();
 
     expect(result.status).toBe("failed");

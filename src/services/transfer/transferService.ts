@@ -322,6 +322,14 @@ async function submitStellarPayment(
 /**
  * Create a transfer: resolve recipient, create Transaction row, optionally submit Stellar payment.
  * When getSenderSigningKey is not provided or returns null, status remains 'pending'.
+ *
+ * Throws {@link StellarFeeSurgeError} when the network fee is above the
+ * configured payment ceiling or a payment is rejected for underpricing and
+ * cannot be repriced. The Transaction row is still marked `failed` and a
+ * `transfer.failed` event is emitted first, so a rethrow never leaves an
+ * orphaned or inconsistent record. The error is a 503: nothing was submitted
+ * and no funds moved, so the caller may retry. All other submission failures
+ * resolve to a `failed` status rather than throwing (AB-052).
  */
 export async function createTransfer(
   params: CreateTransferParams,
@@ -542,6 +550,16 @@ export async function createTransfer(
           errorCode: isFeeSurge ? err.code : undefined,
           errorMessage: err instanceof Error ? err.message : String(err),
         });
+
+        // A fee surge is retryable and no funds moved, so the caller is told
+        // explicitly rather than receiving an indistinguishable "failed" result
+        // that reads like a permanent problem. Only this error type is
+        // rethrown: every other submission failure keeps its existing behaviour
+        // of resolving to a failed transfer, since those are not transient and
+        // retrying them is the caller's decision (AB-052).
+        if (isFeeSurge) {
+          throw err;
+        }
       }
     }
   }

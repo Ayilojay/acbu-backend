@@ -26,6 +26,8 @@ jest.mock("../config/logger", () => ({
 }));
 
 import { createTransfer } from "../services/transfer/transferService";
+import { StellarFeeSurgeError } from "../errors";
+import { AppError } from "../middleware/errorHandler";
 
 const makeRes = () => {
   const res = { status: jest.fn(), json: jest.fn() } as unknown as Response;
@@ -126,6 +128,40 @@ describe("transferController", () => {
         transaction_id: "tx-1",
         status: "pending",
       });
+    });
+
+    it("forwards a fee surge as a retryable 503 rather than a 500 (AB-052)", async () => {
+      // createTransfer rethrows StellarFeeSurgeError after marking the row
+      // failed. It must reach the error handler as an AppError so the client
+      // gets 503 + STELLAR_FEE_SURGE and knows to retry, not a 500.
+      (createTransfer as jest.Mock).mockRejectedValue(
+        new StellarFeeSurgeError({
+          networkFeeStroops: 2_000_000,
+          transactionFeeStroops: 1_000_000,
+          maxFeeStroops: 1_000_000,
+          detectedBy: "fee_pricing",
+        }),
+      );
+      const res = makeRes();
+      const next = makeNext();
+      await postTransfers(
+        {
+          body: { to: "@bob", amount_acbu: "10" },
+          apiKey: { userId: "u1" },
+          // postTransfers always reads the If-Match header, so the fake request
+          // has to answer it before the transfer is attempted.
+          header: jest.fn().mockReturnValue(undefined),
+        } as unknown as AuthRequest,
+        res,
+        next,
+      );
+
+      // Nothing was written to the success path.
+      expect(res.status).not.toHaveBeenCalled();
+      const forwarded = (next as jest.Mock).mock.calls[0][0];
+      expect(forwarded).toBeInstanceOf(AppError);
+      expect(forwarded).toMatchObject({ statusCode: 503, code: "STELLAR_FEE_SURGE" });
+      expect((forwarded as StellarFeeSurgeError).networkFeeStroops).toBe(2_000_000);
     });
 
     it("passes the Idempotency-Key header into transfer creation", async () => {
