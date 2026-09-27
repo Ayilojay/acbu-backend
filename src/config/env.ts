@@ -168,6 +168,140 @@ const envSchema = z.object({
   // parsed env and the audit email silently never sent. Declared here as an
   // optional, trimmed, comma-separated admin distribution list.
   NOTIFICATION_ALERT_EMAIL: z.string().trim().optional(),
+
+  // ---------------------------------------------------------------------------
+  // Previously-undeclared variables
+  // ---------------------------------------------------------------------------
+  // Every key below was read from the parsed env (i.e. `env.FOO`) but was never
+  // declared here. Zod strips undeclared keys, so each of these was silently
+  // `undefined` at runtime, and because the read failed to type-check its type
+  // fell back to `any` -- which also suppressed type-checking in every consumer
+  // downstream. This is the same defect class as AB-045 above, at scale.
+  //
+  // Defaults below are taken from the values already documented in ENV_VARS.md,
+  // .env.example and docs/fees.md; nothing here is newly invented. Where a
+  // default was not documented the key is declared `.optional()` so the value
+  // stays `undefined` exactly as before, with the fallback left in the config
+  // object below (or in src/config/limits.ts for the LIMIT_* keys).
+
+  // Stellar chain
+  STELLAR_NETWORK: z.string().default("testnet"),
+  STELLAR_HORIZON_URL: z.string().optional(),
+  STELLAR_SOROBAN_RPC_URL: z.string().optional(),
+  STELLAR_SECRET_KEY: z.string().optional(),
+  STELLAR_NATIVE_ASSET_CODE: z.string().optional(),
+  // These four are fallbacks for one another; `config.stellar.activationAmount`
+  // applies the "1" default and validates it, so they stay plain strings here.
+  WALLET_ACTIVATION_AMOUNT: z.string().optional(),
+  WALLET_ACTIVATION_NATIVE: z.string().optional(),
+  WALLET_ACTIVATION_XLM: z.string().optional(),
+  STELLAR_MIN_BALANCE: z.string().optional(),
+  WALLET_ACTIVATION_STRATEGY: z.string().default("create_account_native"),
+
+  // USDC / FX
+  USDC_ASSET_CODE_MAINNET: z.string().default("USDC"),
+  USDC_ASSET_CODE_TESTNET: z.string().default("USDC"),
+  USDC_XLM_SLIPPAGE_BPS: z.coerce.number().int().nonnegative().default(50),
+  EXCHANGERATE_API_BASE_URL: z.string().optional(),
+  EXCHANGERATE_API_KEY: z.string().optional(),
+
+  // Reserve ratios (docs/fees.md, ENV_VARS.md)
+  RESERVE_MIN_RATIO: z.coerce.number().positive().default(1.02),
+  RESERVE_TARGET_RATIO: z.coerce.number().positive().default(1.05),
+  RESERVE_ALERT_THRESHOLD: z.coerce.number().positive().default(1.02),
+  RESERVE_DRIFT_THRESHOLD_PCT: z.coerce.number().nonnegative().default(1),
+
+  // Oracle
+  ORACLE_CIRCUIT_BREAKER_THRESHOLD: z.coerce.number().positive().default(0.1),
+  ORACLE_EMERGENCY_THRESHOLD: z.coerce.number().positive().default(0.05),
+  ORACLE_MAX_DEVIATION_PER_UPDATE: z.coerce.number().positive().default(0.05),
+  ORACLE_UPDATE_INTERVAL_HOURS: z.coerce.number().int().positive().default(6),
+
+  // Redis
+  REDIS_URL: z.string().optional(),
+  REDIS_PASSWORD: z.string().optional(),
+  REDIS_SENTINELS: z.string().optional(),
+  REDIS_SENTINEL_NAME: z.string().optional(),
+  REDIS_MAX_RETRIES_PER_REQUEST: z.coerce.number().int().nonnegative().default(3),
+  REDIS_READONLY_RETRY_ATTEMPTS: z.coerce.number().int().nonnegative().default(3),
+  REDIS_READONLY_RETRY_DELAY_MS: z.coerce.number().int().nonnegative().default(100),
+
+  // S3 / object storage
+  S3_ACCESS_KEY_ID: z.string().optional(),
+  S3_SECRET_ACCESS_KEY: z.string().optional(),
+  S3_REGION: z.string().optional(),
+  S3_BUCKET: z.string().optional(),
+  S3_ENDPOINT: z.string().optional(),
+  S3_DOWNLOAD_URL_TTL_SECONDS: z.coerce.number().int().positive().default(300),
+  S3_UPLOAD_URL_TTL_SECONDS: z.coerce.number().int().positive().default(900),
+  S3_SCAN_WEBHOOK_SECRET: z.string().optional(),
+
+  // AWS / SES
+  AWS_ACCESS_KEY_ID: z.string().optional(),
+  AWS_SECRET_ACCESS_KEY: z.string().optional(),
+  AWS_REGION: z.string().optional(),
+  AWS_SES_REGION: z.string().optional(),
+
+  // Soroban contract addresses
+  CONTRACT_BURNING: z.string().optional(),
+  CONTRACT_ESCROW: z.string().optional(),
+  CONTRACT_LENDING_POOL: z.string().optional(),
+  CONTRACT_MINTING: z.string().optional(),
+  CONTRACT_ORACLE: z.string().optional(),
+  CONTRACT_RESERVE_TRACKER: z.string().optional(),
+  CONTRACT_SAVINGS_VAULT: z.string().optional(),
+
+  // Email / SMS
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: z.coerce.number().int().positive().max(65535).default(587),
+  SMTP_SECURE: z
+    .string()
+    .toLowerCase()
+    .pipe(z.enum(["true", "false"]))
+    .default("false"),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
+  SMTP_MAX_CONNECTIONS: z.coerce.number().int().positive().default(5),
+  SMTP_MAX_MESSAGES: z.coerce.number().int().positive().default(100),
+  SENDGRID_API_KEY: z.string().optional(),
+  NOTIFICATION_EMAIL_PROVIDER: z.string().default("log"),
+  NOTIFICATION_SMS_PROVIDER: z.string().default("log"),
+  NOTIFICATION_FROM_EMAIL: z.string().optional(),
+
+  // Twilio
+  TWILIO_ACCOUNT_SID: z.string().optional(),
+  TWILIO_AUTH_TOKEN: z.string().optional(),
+  TWILIO_FROM_NUMBER: z.string().optional(),
+
+  // Payment providers
+  FLUTTERWAVE_BASE_URL: z.string().optional(),
+  FLUTTERWAVE_SECRET_KEY: z.string().optional(),
+  FLUTTERWAVE_PUBLIC_KEY: z.string().optional(),
+  FLUTTERWAVE_ENCRYPTION_KEY: z.string().optional(),
+  FLUTTERWAVE_WEBHOOK_SECRET: z.string().optional(),
+  PAYSTACK_BASE_URL: z.string().optional(),
+  PAYSTACK_SECRET_KEY: z.string().optional(),
+  MTN_MOMO_BASE_URL: z.string().optional(),
+  MTN_MOMO_API_KEY: z.string().optional(),
+  MTN_MOMO_API_USER_ID: z.string().optional(),
+  MTN_MOMO_SUBSCRIPTION_KEY: z.string().optional(),
+  MTN_MOMO_TARGET_ENVIRONMENT: z.string().optional(),
+
+  // Voice / telephony, webhooks
+  AFRICAS_TALKING_USERNAME: z.string().optional(),
+  AFRICAS_TALKING_API_KEY: z.string().optional(),
+  // Auth brute-force protection
+  AUTH_BRUTE_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
+  AUTH_BRUTE_LOCKOUT_MS: z.coerce.number().int().positive().default(900000),
+  CAPTCHA_SECRET: z.string().optional(),
+  WEBHOOK_URL: z.string().optional(),
+  WEBHOOK_SECRET: z.string().optional(),
+  BILLS_WEBHOOK_SECRET: z.string().optional(),
+
+  // Comma-separated / JSON config blobs. Parsed in the config object below, so
+  // they stay strings here.
+  CURRENCY_CENTRAL_BANK_URLS: z.string().optional(),
+  FINTECH_CURRENCY_PROVIDERS: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -551,13 +685,8 @@ export const config = {
     escrow: env.CONTRACT_ESCROW || "",
   },
 
-  // Bulk transfer CSV upload processing
-  bulkTransfer: {
-    /** Rows per transaction chunk. Default 100. */
-    chunkSize: parseInt(process.env.BULK_TRANSFER_CHUNK_SIZE || "100", 10),
-    /** Upload size limit in bytes. Default 10485760 (10 MiB). */
-    maxFileSizeBytes: parseInt(process.env.BULK_TRANSFER_MAX_FILE_SIZE_BYTES || "10485760", 10),
-  },
+  // Bulk transfer CSV upload processing is defined once, below, reading the
+  // validated `env` rather than process.env directly.
 
   // Oracle (40/40/20: central bank, fintech, forex)
   oracle: {
@@ -624,31 +753,13 @@ export const config = {
     secret: env.WEBHOOK_SECRET,
   },
 
-  // Limits
-  limits: {
-    retail: {
-      depositDailyUsd: env.LIMIT_RETAIL_DEPOSIT_DAILY_USD,
-      depositMonthlyUsd: env.LIMIT_RETAIL_DEPOSIT_MONTHLY_USD,
-      withdrawalSingleCurrencyDailyUsd: env.LIMIT_RETAIL_WITHDRAWAL_DAILY_USD,
-      withdrawalSingleCurrencyMonthlyUsd: env.LIMIT_RETAIL_WITHDRAWAL_MONTHLY_USD,
-    },
-    business: {
-      depositDailyUsd: env.LIMIT_BUSINESS_DEPOSIT_DAILY_USD,
-      depositMonthlyUsd: env.LIMIT_BUSINESS_DEPOSIT_MONTHLY_USD,
-      withdrawalSingleCurrencyDailyUsd: env.LIMIT_BUSINESS_WITHDRAWAL_DAILY_USD,
-      withdrawalSingleCurrencyMonthlyUsd: env.LIMIT_BUSINESS_WITHDRAWAL_MONTHLY_USD,
-    },
-    government: {
-      depositDailyUsd: env.LIMIT_GOV_DEPOSIT_DAILY_USD,
-      depositMonthlyUsd: env.LIMIT_GOV_DEPOSIT_MONTHLY_USD,
-      withdrawalSingleCurrencyDailyUsd: env.LIMIT_GOV_WITHDRAWAL_DAILY_USD,
-      withdrawalSingleCurrencyMonthlyUsd: env.LIMIT_GOV_WITHDRAWAL_MONTHLY_USD,
-    },
-    circuitBreaker: {
-      reserveWeightThresholdPct: env.LIMIT_CIRCUIT_BREAKER_RESERVE_WEIGHT_PCT,
-      minReserveRatio: env.LIMIT_CIRCUIT_BREAKER_MIN_RATIO,
-    },
-  },
+  // Limits are NOT exposed here on purpose. `config.limits` existed but had no
+  // readers anywhere in the codebase, so a second copy of the retail/business/
+  // government USD limits sat in config that nothing consumed: setting the
+  // LIMIT_* variables appeared to configure limits while changing nothing. The
+  // live implementation is `src/config/limits.ts`, which reads process.env
+  // directly via `readNumber(name, fallback)` and is consumed by
+  // `src/services/limits/limitsService.ts`. Keep the defaults in that one place.
 
   // Auth Security
   auth: {
@@ -701,10 +812,5 @@ export const config = {
     leakThresholdPct: env.MEMORY_LEAK_THRESHOLD_PCT,
     checkIntervalMs: env.MEMORY_CHECK_INTERVAL_MS,
     heapDumpDir: env.HEAP_DUMP_DIR,
-  },
-
-  bulkTransfer: {
-    chunkSize: env.BULK_TRANSFER_CHUNK_SIZE,
-    maxFileSizeBytes: env.BULK_TRANSFER_MAX_FILE_SIZE_BYTES,
   },
 };
