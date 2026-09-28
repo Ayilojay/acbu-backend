@@ -225,7 +225,7 @@ export async function mintFromUsdcInternal(
       recipient: walletAddress,
     });
     const acbuDecimal = contractNumberToDecimal(Number(result.acbuAmount));
-    const acbuNum = acbuDecimal.toNumber();
+    const acbuNum = Number(acbuDecimal.toString());
     await prisma.transaction.update({
       where: { id: tx.id },
       data: {
@@ -330,7 +330,7 @@ export async function depositFromBasketCurrency(
     }
 
     const amountDecimal = parseMonetaryString(amount, "amount");
-    const amountNum = amountDecimal.toNumber(); // Only convert at boundary for existing code
+    const amountNum = Number(amountDecimal.toString()); // Reporting boundary: convert via string to preserve exact value
     const userId = req.apiKey?.userId;
 
     if (!userId) {
@@ -405,7 +405,7 @@ export async function depositFromBasketCurrency(
           localAmount: new Decimal(amountDecimal),
           rateSnapshot: {
             deposit_currency: currency,
-            amount: amountDecimal.toNumber(),
+            amount: Number(amountDecimal.toString()),
             timestamp: new Date().toISOString(),
           },
         },
@@ -447,7 +447,7 @@ export async function depositFromBasketCurrency(
       newValue: {
         type: "mint",
         currency,
-        amount: amountDecimal.toNumber(),
+        amount: Number(amountDecimal.toString()),
         wallet_address: wallet_address ? "***" : undefined,
       },
       performedBy: req.apiKey?.userId ?? undefined,

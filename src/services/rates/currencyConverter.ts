@@ -121,7 +121,7 @@ export async function convertLocalToUsd(
   const usdAmount = acbuAmount.mul(acbuUsdRate);
 
   // Return as number with precision
-  return usdAmount.toNumber();
+  return Number(usdAmount.toString());
 }
 
 /**
@@ -192,7 +192,7 @@ export async function convertLocalToUsdWithPrecision(
   const usdAmount = acbuAmount.mul(acbuUsdRate);
 
   return {
-    usdAmount: usdAmount.toNumber(),
+    usdAmount: Number(usdAmount.toString()),
     originalAmount: localAmountDecimal,
     acbuEquivalent: acbuAmount,
   };

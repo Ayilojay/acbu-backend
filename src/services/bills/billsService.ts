@@ -435,7 +435,7 @@ export async function reconcileBillsWebhook(event: BillsWebhookEvent): Promise<{
     accountId: transaction.userId ?? transaction.id,
     idempotencyKey: transaction.id,
     correlationId: crypto.randomUUID(),
-    amount: Math.round((transaction.localAmount?.toNumber() ?? event.amount) * 100),
+    amount: Math.round((transaction.localAmount != null ? Number(transaction.localAmount.toString()) : event.amount) * 100),
     currency: transaction.localCurrency ?? event.currency,
     provider: event.provider,
     providerRef: event.providerReference,
@@ -478,7 +478,7 @@ export async function refundBillPayment(
     asJsonRecord(transaction.rateSnapshot).provider || DEFAULT_PROVIDER_ID,
   );
   const provider = getBillsProvider(providerId);
-  const localAmount = transaction.localAmount?.toNumber() ?? 0;
+  const localAmount = transaction.localAmount != null ? Number(transaction.localAmount.toString()) : 0;
   const currency = transaction.localCurrency ?? "NGN";
 
   const refundResponse = await provider.refundBill({

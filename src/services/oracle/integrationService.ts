@@ -133,7 +133,7 @@ export async function fetchAndStoreRates(): Promise<void> {
         where: { currency },
         orderBy: { timestamp: "desc" },
       });
-      const prevRateNum = prevRate?.medianRate.toNumber();
+      const prevRateNum = prevRate?.medianRate != null ? Number(prevRate.medianRate.toString()) : undefined;
       const maxDeviation = config.oracle.maxDeviationPerUpdate ?? 0.05;
       const circuitThreshold = config.oracle.circuitBreakerThreshold ?? 0.1;
 
@@ -241,7 +241,7 @@ export async function fetchAndStoreRates(): Promise<void> {
   });
   const change24hUsd =
     prev24h && acbuUsd > 0
-      ? ((acbuUsd - prev24h.acbuUsd.toNumber()) / prev24h.acbuUsd.toNumber()) *
+      ? ((acbuUsd - Number(prev24h.acbuUsd.toString())) / Number(prev24h.acbuUsd.toString())) *
         100
       : null;
 
@@ -299,7 +299,7 @@ export async function getAverageRateOverHours(
   });
   if (rows.length === 0) return null;
   const sum = rows.reduce(
-    (a: number, r: (typeof rows)[number]) => a + r.medianRate.toNumber(),
+    (a: number, r: (typeof rows)[number]) => a + Number(r.medianRate.toString()),
     0,
   );
   return sum / rows.length;

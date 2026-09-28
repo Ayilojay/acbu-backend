@@ -8,6 +8,7 @@ import { basketService } from "../basket";
 import { fetchGdpUsd, fetchPopulation } from "./worldBankClient";
 import { BASKET_CURRENCIES, roundWeightsToExactBasisPoints } from "../../config/basket";
 import { Decimal } from "@prisma/client/runtime/library";
+import { decimalToNumber } from "../../utils/decimalUtils";
 
 const GDP_WEIGHT = 0.4;
 const TRADE_WEIGHT = 0.3;
@@ -50,7 +51,7 @@ async function getTradeVolumeByCurrency(
     const cc = b.localCurrency ?? "";
     if (!byCurrency.has(cc)) continue;
     const amount =
-      b.acbuAmountBurned?.toNumber() ?? b.localAmount?.toNumber() ?? 0;
+      decimalToNumber(b.acbuAmountBurned) || decimalToNumber(b.localAmount) || 0;
     byCurrency.set(cc, (byCurrency.get(cc) ?? 0) + amount);
   }
   return byCurrency;

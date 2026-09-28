@@ -143,7 +143,7 @@ export async function burnAcbu(
     ) {
       throw new Error(`Rate not found for currency ${currency}`);
     }
-    const acbuPerLocalDecimal = new Decimal(acbuPerLocal.toNumber());
+    const acbuPerLocalDecimal = new Decimal(acbuPerLocal.toString());
     const localDecimal = acbuDecimal.mul(acbuPerLocalDecimal);
 
     // SECURITY: Always enforce circuit breaker and withdrawal limits
@@ -240,7 +240,7 @@ export async function burnAcbu(
       entityType: "transaction",
       entityId: tx.id,
       action: "burn_created",
-      newValue: { type: "burn", acbuAmount: acbuDecimal.toNumber(), currency },
+      newValue: { type: "burn", acbuAmount: acbuDecimal.toString(), currency },
       performedBy: req.apiKey?.userId ?? undefined,
     });
 
