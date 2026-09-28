@@ -12,12 +12,15 @@
  * - Diff report includes per-currency analysis with thresholds
  * - Audit stored with "pending" status awaiting manual approval
  * - Audit log entries created for all policy drift events
+ *
+ * AB-026: Uses a distributed MongoDB lock so only one instance executes the
+ * audit per week under horizontal scaling.
  */
-
 import { logger } from "../config/logger";
 import { weightDriftAuditService } from "../services/reserve/WeightDriftAuditService";
 import { sendEmail } from "../services/notification";
 import { config } from "../config/env";
+import { acquireJobLock, releaseJobLock } from "../utils/jobLock";
 
 const DEFAULT_INTERVAL_DAYS = 7; // Run weekly
 const INTERVAL_MS =
@@ -31,6 +34,11 @@ const INTERVAL_MS =
   1000;
 
 const MAX_TIMEOUT_MS = 2147483647; // Max for 32-bit signed int
+
+const JOB_NAME = "weight-drift-audit";
+// Lock TTL is 6 days 22 h — expires well before the next weekly run so a
+// crashed instance can never block the following week's execution indefinitely.
+const LOCK_TTL_S = (6 * 24 + 22) * 60 * 60;
 
 let stopRequested = false;
 
@@ -71,9 +79,16 @@ async function longSleep(ms: number): Promise<void> {
 }
 
 /**
- * Execute weight drift audit job once
+ * Execute weight drift audit job once, guarded by a distributed lock.
+ * Returns immediately without doing work if another instance already holds the lock.
  */
 export async function runWeightDriftAuditOnce(): Promise<void> {
+  const acquired = await acquireJobLock(JOB_NAME, LOCK_TTL_S);
+  if (!acquired) {
+    logger.info("Weight drift audit skipped — another instance holds the lock");
+    return;
+  }
+
   const startTime = Date.now();
 
   try {
@@ -170,6 +185,8 @@ Created At: ${new Date().toISOString()}
     });
 
     // Don't re-throw; allow scheduler to continue
+  } finally {
+    await releaseJobLock(JOB_NAME);
   }
 }
 
@@ -218,6 +235,7 @@ export async function startWeightDriftAuditScheduler(): Promise<void> {
 
   logger.info("Weight drift audit scheduler started", {
     intervalDays: INTERVAL_MS / (24 * 60 * 60 * 1000),
+    lockTtlSeconds: LOCK_TTL_S,
   });
 }
 
