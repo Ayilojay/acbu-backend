@@ -14,6 +14,7 @@ import { reserveTracker, ReserveTracker } from "../reserve/ReserveTracker";
 import type { Audience } from "../../middleware/auth";
 import { AppError } from "../../middleware/errorHandler";
 import { getStartOfZonedDay, getStartOfZonedMonth } from "../../utils/dateUtils";
+import { getAcbuUsdRate } from "../../utils/priceUtils";
 
 function buildActorWhere(userId: string | null, organizationId: string | null) {
   if (userId) {
@@ -116,7 +117,12 @@ export async function checkDepositLimits(
 
 /**
  * Check withdrawal (single-currency burn) limits for the given actor and audience.
- * Uses ACBU amounts (limits doc USD values treated as ACBU-equivalent for comparison when rate not applied).
+ *
+ * The configured caps (`withdrawalSingleCurrencyDailyUsd` /
+ * `withdrawalSingleCurrencyMonthlyUsd`) are denominated in USD, while the
+ * aggregated burn amounts are ACBU units. Convert the ACBU amounts to their
+ * USD-equivalent value before comparing so the limit is evaluated against the
+ * correct magnitude.
  * Throws AppError if limit exceeded.
  */
 export async function checkWithdrawalLimits(
@@ -156,13 +162,19 @@ export async function checkWithdrawalLimits(
   const dailyAcbu = new Decimal(burnedDaily._sum.acbuAmountBurned ?? 0).plus(amountAcbu);
   const monthlyAcbu = new Decimal(burnedMonthly._sum.acbuAmountBurned ?? 0).plus(amountAcbu);
 
-  if (dailyAcbu.greaterThan(config.withdrawalSingleCurrencyDailyUsd)) {
+  // Convert ACBU amounts to USD-equivalent before comparing against the
+  // USD-denominated withdrawal caps.
+  const acbuUsdRate = await getAcbuUsdRate();
+  const dailyUsd = dailyAcbu.mul(acbuUsdRate);
+  const monthlyUsd = monthlyAcbu.mul(acbuUsdRate);
+
+  if (dailyUsd.greaterThan(config.withdrawalSingleCurrencyDailyUsd)) {
     throw new AppError(
       `Withdrawal daily limit for ${currency} exceeded ($${config.withdrawalSingleCurrencyDailyUsd} equivalent).`,
       429,
     );
   }
-  if (monthlyAcbu.greaterThan(config.withdrawalSingleCurrencyMonthlyUsd)) {
+  if (monthlyUsd.greaterThan(config.withdrawalSingleCurrencyMonthlyUsd)) {
     throw new AppError(
       `Withdrawal monthly limit for ${currency} exceeded ($${config.withdrawalSingleCurrencyMonthlyUsd} equivalent).`,
       429,
