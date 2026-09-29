@@ -110,7 +110,8 @@ export class MTNMoMoClient implements FintechProvider {
   ): Promise<DisburseResult> {
     try {
       const token = await this.ensureToken();
-      const referenceId = `acbu-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const crypto = require("crypto");
+      const referenceId = `acbu-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
       const body = {
         amount: String(amount),
         currency,

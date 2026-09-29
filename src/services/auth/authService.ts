@@ -126,7 +126,9 @@ function normalizeIdentifier(s: string): {
 }
 
 function generateOtpCode(): string {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  const crypto = require("crypto");
+  // Generate cryptographically secure random 6-digit OTP (100000-999999)
+  return String(crypto.randomInt(100000, 1000000));
 }
 
 function isAdminTierUser(tier: string | null | undefined): boolean {
