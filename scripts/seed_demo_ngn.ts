@@ -3,7 +3,7 @@ import { execSync } from "node:child_process";
 
 import { ContractClient } from "../src/services/stellar/contractClient";
 import { stellarClient } from "../src/services/stellar/client";
-import { contractAddresses } from "../src/config/contracts";
+import { getContractAddresses } from "../src/config/contracts";
 import { BASKET_CURRENCIES, BASKET_WEIGHTS } from "../src/config/basket";
 
 function currencyCodeToScVal(code: string): xdr.ScVal {
@@ -74,8 +74,9 @@ function tryDeployOrResolveAssetContractId(opts: {
 }
 
 async function main(): Promise<void> {
-  const oracleId = contractAddresses.oracle;
-  const mintingId = contractAddresses.minting;
+  const addresses = getContractAddresses();
+  const oracleId = addresses.oracle;
+  const mintingId = addresses.minting;
   const sourceSecret = mustGetEnv("STELLAR_SECRET_KEY");
   const issuer = mustGetEnv("STELLAR_ACBU_ASSET_ISSUER");
   const network = (process.env.STELLAR_NETWORK || "testnet").toLowerCase();

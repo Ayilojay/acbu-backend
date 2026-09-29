@@ -4,7 +4,7 @@ import { resolveRecipient } from "../services/recipient/recipientResolver";
 import { AppError } from "../middleware/errorHandler";
 
 /**
- * GET /recipient?q=@jane | +2348012345678 | email@example.com
+ * GET /recipient?q=@jane | +15551234567 | user@example.com
  * Returns recipient display info (no stellarAddress). Requires user-scoped API key.
  */
 export async function getRecipient(

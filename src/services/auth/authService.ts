@@ -4,17 +4,43 @@
  * If 2FA enabled, returns challenge_token (JWT); else issues api_key.
  * OTP (sms/email) is created and published to RabbitMQ OTP_SEND for delivery.
  */
-import bcrypt from "bcryptjs";
+import bcrypt from "bcrypt";
 import { totp } from "otplib";
+import { randomUUID, createHash } from "crypto";
+import { config } from "../../config/env";
 import { prisma } from "../../config/database";
 import { generateApiKey } from "../../middleware/auth";
-import { signChallengeToken, verifyChallengeToken } from "../../utils/jwt";
+import { signChallengeToken, verifyChallengeToken, revokeJti } from "../../utils/jwt";
 import { logger } from "../../config/logger";
 import { getRabbitMQChannel } from "../../config/rabbitmq";
+import { generateId } from "../../utils/idGenerator";
 import { QUEUES } from "../../config/rabbitmq";
 import { ensureWalletForUser } from "../wallet/walletService";
 import { logAudit } from "../audit";
 import { authBruteGuard } from "../../utils/authBruteGuard";
+import { PermissionsArraySchema, PermissionScope } from "../../types/permissions";
+import {
+  UsernameTakenError,
+  InvalidCredentialsError,
+  TooManyAttemptsError,
+  CaptchaRequiredError,
+  TwoFactorChannelNotConfiguredError,
+  InvalidOrExpiredChallengeError,
+  InvalidCodeError,
+  InvalidOrExpiredCodeError,
+  TotpNotConfiguredError,
+  UnsupportedTwoFactorMethodError,
+  AdminTierAccessRequiredError,
+  OrganizationContextRequiredError,
+  TwoFactorRequiredForAdminError,
+  ReasonRequiredError,
+  AdminScopeRequiredError,
+  BreakGlassTtlError,
+  PrivilegedKeyNotFoundError,
+  InvalidOrExpiredRefreshTokenError,
+  InvalidRefreshTokenError,
+  ValidationError,
+} from "../../errors/index";
 
 const DUMMY_HASH = "$2a$10$CwTycUXWue0Thq9StjUM0uEnOTWj2XOTl0pypEQuA7y2h2H6jX.m2"; // hash for 'dummy'
 
@@ -33,6 +59,7 @@ export interface SigninParams {
   passcode: string;
   ip: string;
   captchaToken?: string;
+  issueRefreshToken?: boolean;
 }
 
 export type SigninResult =
@@ -44,12 +71,15 @@ export type SigninResult =
       passphrase?: string;
       encryption_method_required?: boolean;
       stellar_address?: string | null;
+      refresh_token?: string;
+      refresh_token_expires_at?: string;
     };
 
 export interface Verify2faParams {
   challenge_token: string;
   code: string;
   ip: string;
+  issueRefreshToken?: boolean;
 }
 
 export interface Verify2faResult {
@@ -59,6 +89,8 @@ export interface Verify2faResult {
   passphrase?: string;
   encryption_method_required?: boolean;
   stellar_address?: string | null;
+  refresh_token?: string;
+  refresh_token_expires_at?: string;
 }
 
 export interface RequestAdminMfaChallengeResult {
@@ -100,12 +132,8 @@ const OTP_EXPIRY_MINUTES = 10;
 const ADMIN_TIER = "enterprise";
 const BREAK_GLASS_DEFAULT_TTL_MINUTES = 15;
 const BREAK_GLASS_MAX_TTL_MINUTES = 60;
-const ADMIN_SCOPES = [
-  "p2p:admin",
-  "sme:admin",
-  "gateway:admin",
-  "enterprise:admin",
-] as const;
+const REFRESH_TOKEN_EXPIRY_DAYS = 30;
+const ADMIN_SCOPES = ["p2p:admin", "sme:admin", "gateway:admin", "enterprise:admin"] as const;
 
 function normalizeIdentifier(s: string): {
   kind: "username" | "email" | "phone";
@@ -135,12 +163,17 @@ function isAdminTierUser(tier: string | null | undefined): boolean {
   return tier === ADMIN_TIER;
 }
 
-function validateAdminScopes(scopes: string[]): string[] {
-  if (!Array.isArray(scopes) || scopes.length === 0) {
-    return [];
+function validateAdminScopes(scopes: string[]): PermissionScope[] {
+  const parsed = PermissionsArraySchema.safeParse(scopes);
+  if (!parsed.success) {
+    const invalid = parsed.error.errors.map((e) => e.message).join(", ");
+    throw new ValidationError(`Invalid permission scope(s): ${invalid}`);
   }
-  const allowed = new Set<string>(ADMIN_SCOPES);
-  return scopes.filter((scope) => allowed.has(scope));
+  const adminOnly = parsed.data.filter((s) => (ADMIN_SCOPES as readonly string[]).includes(s));
+  if (adminOnly.length === 0) {
+    throw new AdminScopeRequiredError();
+  }
+  return adminOnly as PermissionScope[];
 }
 
 async function publishOtp(channel: "sms" | "email", to: string, code: string) {
@@ -156,9 +189,9 @@ async function verifyMfaChallengeForUser(
   challengeToken: string,
   code: string,
 ): Promise<"totp" | "sms" | "email"> {
-  const payload = verifyChallengeToken(challengeToken);
+  const payload = await verifyChallengeToken(challengeToken);
   if (payload.userId !== userId) {
-    throw new Error("Invalid or expired challenge");
+    throw new InvalidOrExpiredChallengeError();
   }
 
   const user = await prisma.user.findUnique({
@@ -166,16 +199,21 @@ async function verifyMfaChallengeForUser(
     select: { id: true, twoFaMethod: true, totpSecretEncrypted: true },
   });
   if (!user || !user.twoFaMethod) {
-    throw new Error("2FA required for admin-tier users");
+    throw new TwoFactorRequiredForAdminError();
   }
 
   if (user.twoFaMethod === "totp") {
     if (!user.totpSecretEncrypted) {
-      throw new Error("TOTP not configured");
+      throw new TotpNotConfiguredError();
     }
     const valid = totp.check(code, user.totpSecretEncrypted);
     if (!valid) {
-      throw new Error("Invalid code");
+      throw new InvalidCodeError();
+    }
+    // Consume the challenge token by revoking its jti
+    if (payload.jti) {
+      const exp = payload.exp ?? Math.floor(Date.now() / 1000) + 300;
+      revokeJti(payload.jti, exp);
     }
     return "totp";
   }
@@ -192,20 +230,25 @@ async function verifyMfaChallengeForUser(
       orderBy: { createdAt: "desc" },
     });
     if (!challenge) {
-      throw new Error("Invalid or expired code");
+      throw new InvalidOrExpiredCodeError();
     }
     const match = await bcrypt.compare(code, challenge.codeHash);
     if (!match) {
-      throw new Error("Invalid code");
+      throw new InvalidCodeError();
     }
     await prisma.otpChallenge.update({
       where: { id: challenge.id },
       data: { usedAt: now },
     });
+    // Consume the challenge token by revoking its jti
+    if (payload.jti) {
+      const exp = payload.exp ?? Math.floor(Date.now() / 1000) + 300;
+      revokeJti(payload.jti, exp);
+    }
     return user.twoFaMethod;
   }
 
-  throw new Error("Unsupported 2FA method");
+  throw new UnsupportedTwoFactorMethodError();
 }
 
 /**
@@ -225,7 +268,8 @@ export async function resolveUserByIdentifier(identifier: string) {
       id: true,
       passcodeHash: true,
       twoFaMethod: true,
-      tier: true,
+      failedSigninAttempts: true,
+      lockoutUntil: true,
       actorType: true,
       organizationId: true,
     },
@@ -236,6 +280,10 @@ export async function resolveUserByIdentifier(identifier: string) {
       id: "dummy-id",
       passcodeHash: DUMMY_HASH,
       twoFaMethod: null,
+      failedSigninAttempts: 0,
+      lockoutUntil: null,
+      actorType: "retail",
+      organizationId: null,
       isDummy: true,
     };
   }
@@ -247,26 +295,19 @@ export async function resolveUserByIdentifier(identifier: string) {
  * Simple account creation: username + passcode. No email. Stellar wallet is created on first signin.
  */
 export async function signup(params: SignupParams): Promise<SignupResult> {
-  const username = (params.username || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s/g, "");
+  const username = (params.username || "").trim().toLowerCase().replace(/\s/g, "");
   if (!username || username.length > 64) {
-    throw new Error("Username is required and must be at most 64 characters");
+    throw new ValidationError("Username is required and must be at most 64 characters");
   }
-  if (
-    !params.passcode ||
-    params.passcode.length < 4 ||
-    params.passcode.length > 64
-  ) {
-    throw new Error("Passcode must be 4–64 characters");
+  if (!params.passcode || params.passcode.length < 8 || params.passcode.length > 64) {
+    throw new ValidationError("Passcode must be 8–64 characters");
   }
   const existing = await prisma.user.findFirst({
     where: { username },
     select: { id: true },
   });
   if (existing) {
-    throw new Error("Username already taken");
+    throw new UsernameTakenError();
   }
   const passcodeHash = await bcrypt.hash(params.passcode, 10);
   const user = await prisma.user.create({
@@ -302,47 +343,60 @@ export async function signin(params: SigninParams): Promise<SigninResult> {
   // 1. Check brute force status
   const status = await authBruteGuard.getStatus(identifier, ip);
   if (status.locked) {
-    throw new Error("Too many attempts. Please try again later.");
+    throw new TooManyAttemptsError();
   }
   if (status.requiresCaptcha && !captchaToken) {
-    throw new Error("CAPTCHA required");
+    throw new CaptchaRequiredError();
   }
 
   // TODO: Verify captchaToken here if provided
 
   const user = await resolveUserByIdentifier(identifier);
-  // passcodeHash is always present (real or dummy)
-  const match = await bcrypt.compare(passcode, user.passcodeHash!);
 
-  if (user.isDummy || !match) {
-    await authBruteGuard.recordFailure(identifier, ip);
-    logger.warn("Signin: invalid credentials", {
+  if (user?.lockoutUntil && user.lockoutUntil > new Date()) {
+    logger.warn("Signin: account locked", { userId: user.id });
+    throw new TooManyAttemptsError();
+  }
+
+  if (!user || !user.passcodeHash) {
+    logger.warn("Signin: user not found or no passcode", {
       identifier:
         identifier.includes("@") && identifier.includes(".")
           ? "***"
           : identifier.slice(0, 6) + "***",
     });
-    throw new Error("Invalid credentials");
+    throw new InvalidCredentialsError();
   }
 
-  // 2. Reset brute guard on success
-  await authBruteGuard.reset(identifier, ip);
+  const match = await bcrypt.compare(passcode, user.passcodeHash);
+  if (!match) {
+    const failedAttempts = user.failedSigninAttempts + 1;
+    const isLockout = failedAttempts >= config.maxSigninAttempts;
 
-  const mustUseMfa = isAdminTierUser(user.tier);
-  if (mustUseMfa && !user.twoFaMethod) {
-    await logAudit({
-      eventType: "auth",
-      entityType: "user",
-      entityId: user.id,
-      action: "signin_denied_missing_mfa",
-      performedBy: user.id,
-      actorType: user.actorType,
-      keyType: "USER_KEY",
-      organizationId: user.organizationId ?? undefined,
-      reason: "Admin-tier user attempted signin without configured MFA",
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        failedSigninAttempts: failedAttempts,
+        lockoutUntil: isLockout ? new Date(Date.now() + config.signinLockoutDurationMs) : null,
+      },
     });
-    throw new Error("2FA required for admin-tier users");
+
+    logger.warn("Signin: invalid passcode", {
+      userId: user.id,
+      failedAttempts,
+      isLockout,
+    });
+    throw new InvalidCredentialsError();
   }
+
+  // Success: reset failed attempts
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      failedSigninAttempts: 0,
+      lockoutUntil: null,
+    },
+  });
 
   if (user.twoFaMethod) {
     if (user.twoFaMethod === "sms" || user.twoFaMethod === "email") {
@@ -351,7 +405,7 @@ export async function signin(params: SigninParams): Promise<SigninResult> {
         select: { email: true, phoneE164: true },
       });
       const to = user.twoFaMethod === "email" ? u?.email : u?.phoneE164;
-      if (!to) throw new Error("2FA channel not configured");
+      if (!to) throw new TwoFactorChannelNotConfiguredError();
       const code = generateOtpCode();
       const codeHash = await bcrypt.hash(code, 10);
       await prisma.otpChallenge.create({
@@ -416,28 +470,35 @@ export async function signin(params: SigninParams): Promise<SigninResult> {
     passphrase?: string;
     encryption_method_required?: boolean;
     stellar_address?: string | null;
+    refresh_token?: string;
+    refresh_token_expires_at?: string;
   } = { api_key, user_id: user.id, stellar_address: userFull?.stellarAddress };
   if (wallet.wallet_created && wallet.passphrase) {
     out.wallet_created = true;
     out.passphrase = wallet.passphrase;
     out.encryption_method_required = true;
   }
+
+  if (params.issueRefreshToken) {
+    const refreshToken = await issueRefreshToken({ userId: user.id });
+    out.refresh_token = refreshToken.refresh_token;
+    out.refresh_token_expires_at = refreshToken.expires_at;
+  }
+
   return out;
 }
 
 /**
  * Verify 2FA and issue api_key. challenge_token is JWT; code is TOTP or OTP.
  */
-export async function verify2fa(
-  params: Verify2faParams,
-): Promise<Verify2faResult> {
+export async function verify2fa(params: Verify2faParams): Promise<Verify2faResult> {
   const { challenge_token, code, ip } = params;
-  const payload = verifyChallengeToken(challenge_token);
+  const payload = await verifyChallengeToken(challenge_token);
 
   // Check brute force for 2FA
   const status = await authBruteGuard.getStatus(payload.userId, ip);
   if (status.locked) {
-    throw new Error("Too many attempts. Please try again later.");
+    throw new TooManyAttemptsError();
   }
 
   const user = await prisma.user.findUnique({
@@ -446,17 +507,40 @@ export async function verify2fa(
       id: true,
       twoFaMethod: true,
       totpSecretEncrypted: true,
+      lockoutUntil: true,
+      failedSigninAttempts: true,
       actorType: true,
       organizationId: true,
     },
   });
-  if (!user || !user.twoFaMethod)
-    throw new Error("Invalid credentials"); // Uniform message
+  if (!user || !user.twoFaMethod) throw new InvalidCredentialsError();
 
-  let valid = false;
+  if (user.lockoutUntil && user.lockoutUntil > new Date()) {
+    logger.warn("Verify2FA: account locked", { userId: user.id });
+    throw new TooManyAttemptsError();
+  }
+
+  const handleFailure = async () => {
+    const failedAttempts = user.failedSigninAttempts + 1;
+    const isLockout = failedAttempts >= config.maxSigninAttempts;
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        failedSigninAttempts: failedAttempts,
+        lockoutUntil: isLockout ? new Date(Date.now() + config.signinLockoutDurationMs) : null,
+      },
+    });
+  };
+
   if (user.twoFaMethod === "totp") {
-    if (!user.totpSecretEncrypted) throw new Error("TOTP not configured");
-    valid = totp.check(code, user.totpSecretEncrypted);
+    if (!user.totpSecretEncrypted) throw new TotpNotConfiguredError();
+    const valid = totp.check(code, user.totpSecretEncrypted);
+    if (!valid) {
+      logger.warn("Verify2FA: invalid TOTP", { userId: user.id });
+      await handleFailure();
+      throw new InvalidCodeError();
+    }
   } else if (user.twoFaMethod === "sms" || user.twoFaMethod === "email") {
     const now = new Date();
     const challenge = await prisma.otpChallenge.findFirst({
@@ -468,24 +552,29 @@ export async function verify2fa(
       },
       orderBy: { createdAt: "desc" },
     });
-    if (challenge) {
-      valid = await bcrypt.compare(code, challenge.codeHash);
-      if (valid) {
-        await prisma.otpChallenge.update({
-          where: { id: challenge.id },
-          data: { usedAt: now },
-        });
-      }
+    if (!challenge) throw new InvalidOrExpiredCodeError();
+    const match = await bcrypt.compare(code, challenge.codeHash);
+    if (!match) {
+      logger.warn("Verify2FA: invalid OTP", { userId: user.id });
+      await handleFailure();
+      throw new InvalidCodeError();
     }
   }
 
-  if (!valid) {
-    await authBruteGuard.recordFailure(user.id, ip);
-    logger.warn("Verify2FA: invalid code", { userId: user.id });
-    throw new Error("Invalid credentials"); // Uniform message
-  }
+  // Success: reset failed attempts
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      failedSigninAttempts: 0,
+      lockoutUntil: null,
+    },
+  });
 
-  await authBruteGuard.reset(user.id, ip);
+  // Consume the challenge token by revoking its jti
+  if (payload.jti) {
+    const exp = payload.exp ?? Math.floor(Date.now() / 1000) + 300;
+    revokeJti(payload.jti, exp);
+  }
 
   const api_key = await generateApiKey(user.id, []);
   const wallet = await ensureWalletForUser(user.id);
@@ -512,12 +601,21 @@ export async function verify2fa(
     passphrase?: string;
     encryption_method_required?: boolean;
     stellar_address?: string | null;
+    refresh_token?: string;
+    refresh_token_expires_at?: string;
   } = { api_key, user_id: user.id, stellar_address: userFull?.stellarAddress };
   if (wallet.wallet_created && wallet.passphrase) {
     out.wallet_created = true;
     out.passphrase = wallet.passphrase;
     out.encryption_method_required = true;
   }
+
+  if (params.issueRefreshToken) {
+    const refreshToken = await issueRefreshToken({ userId: user.id });
+    out.refresh_token = refreshToken.refresh_token;
+    out.refresh_token_expires_at = refreshToken.expires_at;
+  }
+
   return out;
 }
 
@@ -540,19 +638,19 @@ export async function requestAdminMfaChallenge(
     },
   });
   if (!user || !isAdminTierUser(user.tier)) {
-    throw new Error("Admin-tier access required");
+    throw new AdminTierAccessRequiredError();
   }
   if (!user.organizationId) {
-    throw new Error("Organization context required for admin-tier users");
+    throw new OrganizationContextRequiredError();
   }
   if (!user.twoFaMethod) {
-    throw new Error("2FA required for admin-tier users");
+    throw new TwoFactorRequiredForAdminError();
   }
 
   if (user.twoFaMethod === "sms" || user.twoFaMethod === "email") {
     const to = user.twoFaMethod === "email" ? user.email : user.phoneE164;
     if (!to) {
-      throw new Error("2FA channel not configured");
+      throw new TwoFactorChannelNotConfiguredError();
     }
     const code = generateOtpCode();
     const codeHash = await bcrypt.hash(code, 10);
@@ -593,21 +691,18 @@ export async function issueAdminKey(
     select: { id: true, tier: true, actorType: true, organizationId: true },
   });
   if (!user || !isAdminTierUser(user.tier)) {
-    throw new Error("Admin-tier access required");
+    throw new AdminTierAccessRequiredError();
   }
   if (!user.organizationId) {
-    throw new Error("Organization context required for admin-tier users");
+    throw new OrganizationContextRequiredError();
   }
 
   const reason = params.reason.trim();
   if (!reason) {
-    throw new Error("Reason is required");
+    throw new ReasonRequiredError();
   }
 
   const permissions = validateAdminScopes(params.permissions);
-  if (permissions.length === 0) {
-    throw new Error("At least one admin scope is required");
-  }
 
   await verifyMfaChallengeForUser(user.id, params.challengeToken, params.code);
 
@@ -644,29 +739,24 @@ export async function issueBreakGlassKey(
     select: { id: true, tier: true, actorType: true, organizationId: true },
   });
   if (!user || !isAdminTierUser(user.tier)) {
-    throw new Error("Admin-tier access required");
+    throw new AdminTierAccessRequiredError();
   }
   if (!user.organizationId) {
-    throw new Error("Organization context required for admin-tier users");
+    throw new OrganizationContextRequiredError();
   }
 
   const reason = params.reason.trim();
   if (!reason) {
-    throw new Error("Reason is required");
+    throw new ReasonRequiredError();
   }
 
   const ttlMinutes = params.ttlMinutes ?? BREAK_GLASS_DEFAULT_TTL_MINUTES;
   if (ttlMinutes < 1 || ttlMinutes > BREAK_GLASS_MAX_TTL_MINUTES) {
-    throw new Error(`Break-glass TTL must be between 1 and ${BREAK_GLASS_MAX_TTL_MINUTES} minutes`);
+    throw new BreakGlassTtlError();
   }
 
   const permissions =
-    params.permissions.length > 0
-      ? validateAdminScopes(params.permissions)
-      : [...ADMIN_SCOPES];
-  if (permissions.length === 0) {
-    throw new Error("At least one admin scope is required");
-  }
+    params.permissions.length > 0 ? validateAdminScopes(params.permissions) : [...ADMIN_SCOPES];
 
   await verifyMfaChallengeForUser(user.id, params.challengeToken, params.code);
 
@@ -706,7 +796,7 @@ export async function listPrivilegedKeys(actorUserId: string) {
     select: { id: true, tier: true },
   });
   if (!user || !isAdminTierUser(user.tier)) {
-    throw new Error("Admin-tier access required");
+    throw new AdminTierAccessRequiredError();
   }
 
   const keys = await prisma.apiKey.findMany({
@@ -740,12 +830,12 @@ export async function revokePrivilegedKey(
     select: { id: true, tier: true, actorType: true, organizationId: true },
   });
   if (!user || !isAdminTierUser(user.tier)) {
-    throw new Error("Admin-tier access required");
+    throw new AdminTierAccessRequiredError();
   }
 
   const reason = params.reason.trim();
   if (!reason) {
-    throw new Error("Reason is required");
+    throw new ReasonRequiredError();
   }
 
   const targetKey = await prisma.apiKey.findFirst({
@@ -758,7 +848,7 @@ export async function revokePrivilegedKey(
     select: { id: true, keyType: true },
   });
   if (!targetKey) {
-    throw new Error("Privileged key not found");
+    throw new PrivilegedKeyNotFoundError();
   }
 
   await prisma.apiKey.update({
@@ -776,6 +866,235 @@ export async function revokePrivilegedKey(
     keyType: targetKey.keyType,
     organizationId: user.organizationId ?? undefined,
     reason,
+  });
+
+  return { ok: true };
+}
+
+export interface IssueRefreshTokenParams {
+  userId: string;
+}
+
+export interface IssueRefreshTokenResult {
+  refresh_token: string;
+  expires_at: string;
+}
+
+export interface RefreshAccessTokenParams {
+  refresh_token: string;
+}
+
+export interface RefreshAccessTokenResult {
+  api_key: string;
+  refresh_token: string;
+  user_id: string;
+  expires_at: string;
+}
+
+export interface RevokeRefreshTokenParams {
+  refresh_token: string;
+}
+
+function generateSecureRefreshToken(): string {
+  const bytes = Buffer.from(randomUUID()).toString("base64");
+  return bytes + Buffer.from(randomUUID()).toString("base64");
+}
+
+async function hashRefreshToken(token: string): Promise<string> {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+/**
+ * Issue a new refresh token with a new token family.
+ * This is called during initial authentication.
+ */
+export async function issueRefreshToken(
+  params: IssueRefreshTokenParams,
+): Promise<IssueRefreshTokenResult> {
+  const { userId } = params;
+  const token = generateSecureRefreshToken();
+  const tokenHash = await hashRefreshToken(token);
+  const tokenFamilyId = generateId();
+  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
+
+  await prisma.refreshToken.create({
+    data: {
+      userId,
+      tokenFamilyId,
+      tokenHash,
+      expiresAt,
+    },
+  });
+
+  await logAudit({
+    eventType: "auth",
+    entityType: "refresh_token",
+    action: "refresh_token_issued",
+    performedBy: userId,
+    actorType: "user",
+    keyType: "USER_KEY",
+    newValue: { tokenFamilyId },
+  });
+
+  logger.info("Refresh token issued", { userId, tokenFamilyId });
+
+  return {
+    refresh_token: token,
+    expires_at: expiresAt.toISOString(),
+  };
+}
+
+/**
+ * Validate a refresh token and rotate it (token-family rotation).
+ * When a refresh token is used, the entire family should be invalidated
+ * to detect token theft. A new token in a new family is issued.
+ */
+export async function refreshAccessToken(
+  params: RefreshAccessTokenParams,
+): Promise<RefreshAccessTokenResult> {
+  const { refresh_token } = params;
+
+  const tokenHash = await hashRefreshToken(refresh_token);
+  const now = new Date();
+
+  const existingToken = await prisma.refreshToken.findFirst({
+    where: {
+      tokenHash,
+      revokedAt: null,
+      expiresAt: { gt: now },
+    },
+    include: {
+      user: {
+        select: {
+          id: true,
+          actorType: true,
+          organizationId: true,
+        },
+      },
+    },
+  });
+
+  if (!existingToken) {
+    throw new InvalidOrExpiredRefreshTokenError();
+  }
+
+  const { user, tokenFamilyId } = existingToken;
+
+  // Token-family rotation: invalidate all tokens in the same family
+  // This detects token theft - if an attacker tries to use an old token,
+  // the family will already be revoked
+  await prisma.refreshToken.updateMany({
+    where: {
+      tokenFamilyId,
+      revokedAt: null,
+    },
+    data: {
+      revokedAt: now,
+      replacedByToken: tokenHash,
+    },
+  });
+
+  // Issue a new API key
+  const api_key = await generateApiKey(user.id, [], { keyType: "USER_KEY" });
+
+  // Issue a new refresh token in a NEW family
+  const newToken = generateSecureRefreshToken();
+  const newTokenHash = await hashRefreshToken(newToken);
+  const newTokenFamilyId = generateId();
+  const newExpiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
+
+  await prisma.refreshToken.create({
+    data: {
+      userId: user.id,
+      tokenFamilyId: newTokenFamilyId,
+      tokenHash: newTokenHash,
+      expiresAt: newExpiresAt,
+    },
+  });
+
+  await logAudit({
+    eventType: "auth",
+    entityType: "refresh_token",
+    entityId: existingToken.id,
+    action: "refresh_token_rotated",
+    performedBy: user.id,
+    actorType: user.actorType,
+    keyType: "USER_KEY",
+    organizationId: user.organizationId ?? undefined,
+    oldValue: { oldTokenFamilyId: tokenFamilyId },
+    newValue: { newTokenFamilyId },
+  });
+
+  logger.info("Refresh token rotated", {
+    userId: user.id,
+    oldTokenFamilyId: tokenFamilyId,
+    newTokenFamilyId,
+  });
+
+  return {
+    api_key,
+    refresh_token: newToken,
+    user_id: user.id,
+    expires_at: newExpiresAt.toISOString(),
+  };
+}
+
+/**
+ * Revoke a refresh token and its entire family.
+ */
+export async function revokeRefreshToken(params: RevokeRefreshTokenParams): Promise<{ ok: true }> {
+  const { refresh_token } = params;
+
+  const tokenHash = await hashRefreshToken(refresh_token);
+  const now = new Date();
+
+  const existingToken = await prisma.refreshToken.findFirst({
+    where: {
+      tokenHash,
+      revokedAt: null,
+    },
+    include: {
+      user: {
+        select: {
+          id: true,
+          actorType: true,
+          organizationId: true,
+        },
+      },
+    },
+  });
+
+  if (!existingToken) {
+    throw new InvalidRefreshTokenError();
+  }
+
+  const { user, tokenFamilyId } = existingToken;
+
+  // Revoke all tokens in the family
+  await prisma.refreshToken.updateMany({
+    where: {
+      tokenFamilyId,
+      revokedAt: null,
+    },
+    data: {
+      revokedAt: now,
+    },
+  });
+
+  await logAudit({
+    eventType: "auth",
+    entityType: "refresh_token",
+    entityId: existingToken.id,
+    action: "refresh_token_revoked",
+    performedBy: user.id,
+    actorType: user.actorType,
+    keyType: "USER_KEY",
+    organizationId: user.organizationId ?? undefined,
+  });
+
+  logger.info("Refresh token family revoked", {
+    userId: user.id,
+    tokenFamilyId,
   });
 
   return { ok: true };

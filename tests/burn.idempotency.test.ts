@@ -26,15 +26,6 @@ jest.mock("../src/config/contracts", () => ({
     lendingPool: "",
     escrow: "",
   }),
-  contractAddresses: {
-    oracle: "",
-    reserveTracker: "",
-    minting: "",
-    burning: "burning-contract-id",
-    savingsVault: "",
-    lendingPool: "",
-    escrow: "",
-  },
 }));
 
 jest.mock("../src/services/contracts", () => ({
@@ -120,10 +111,64 @@ describe("B-074 burn idempotency", () => {
     expect(next).not.toHaveBeenCalled();
   });
 
+  it("returns the original transaction for duplicate idempotency key retries", async () => {
+    const existingTx = {
+      id: "tx-2",
+      userId: "user-3",
+      type: "burn",
+      status: "pending",
+      usdcAmount: null,
+      acbuAmount: null,
+      acbuAmountBurned: new Decimal("10"),
+      localCurrency: "NGN",
+      localAmount: new Decimal("5000"),
+      recipientAccount: { account_number: "1" },
+      recipientAddress: null,
+      fee: new Decimal("0.01"),
+      rateSnapshot: { acbu_ngn: null, timestamp: new Date().toISOString() },
+      blockchainTxHash: null,
+      confirmations: 0,
+      createdAt: new Date("2026-04-23T00:00:00.000Z"),
+      completedAt: null,
+    };
+
+    prismaMock.transaction.findFirst.mockResolvedValue(existingTx);
+
+    const req: any = {
+      body: {
+        acbu_amount: "10",
+        currency: "NGN",
+        recipient_account: {
+          account_number: "1",
+          bank_code: "000",
+          account_name: "Test",
+        },
+      },
+      apiKey: { userId: "user-3", organizationId: null },
+      audience: "retail",
+      get: jest.fn().mockReturnValue("dup-burn-key"),
+    };
+
+    const res: any = {
+      status: jest.fn().mockReturnThis(),
+      json: jest.fn().mockReturnThis(),
+    };
+    const next = jest.fn();
+
+    await burnAcbu(req, res, next);
+
+    expect(prismaMock.transaction.create).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ transaction_id: "tx-2" }),
+    );
+    expect(next).not.toHaveBeenCalled();
+  });
+
   it("recovers from concurrent submit via P2002 and returns the existing transaction", async () => {
     const blockchainTxHash = "b".repeat(64);
     const existingTx = {
-      id: "tx-2",
+      id: "tx-3",
       userId: null,
       type: "burn",
       status: "processing",
@@ -195,7 +240,7 @@ describe("B-074 burn idempotency", () => {
 
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({ transaction_id: "tx-2", blockchain_tx_hash: blockchainTxHash }),
+      expect.objectContaining({ transaction_id: "tx-3", blockchain_tx_hash: blockchainTxHash }),
     );
     expect(next).not.toHaveBeenCalled();
   });

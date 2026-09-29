@@ -1,0 +1,46 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":pinVersions"
+  ],
+  "baseBranches": ["dev"],
+  "semanticCommits": "enabled",
+  "semanticCommitType": "chore",
+  "semanticCommitScope": "deps",
+  "labels": ["dependencies"],
+  "timezone": "Etc/UTC",
+  "schedule": ["before 5am on monday"],
+  "packageRules": [
+    {
+      "matchDepTypes": ["devDependencies"],
+      "matchPackageNames": ["eslint", "prettier", "jest", "@types/**"],
+      "groupName": "devDependencies (non-critical)",
+      "automerge": false
+    },
+    {
+      "matchPackageNames": ["node", "@types/node"],
+      "allowedVersions": "^20.0.0",
+      "groupName": "Node.js runtime"
+    },
+    {
+      "matchPackageNames": ["@prisma/client", "prisma"],
+      "groupName": "Prisma Database",
+      "schedule": ["before 5am on the first day of the month"],
+      "minimumReleaseAge": "7 days"
+    },
+    {
+      "matchPackageNames": ["stellar-sdk", "flutterwave-node-v3", "paystack"],
+      "groupName": "Financial SDKs",
+      "schedule": ["before 5am on the first day of the month"],
+      "minimumReleaseAge": "7 days"
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "schedule": ["at any time"],
+    "groupName": "Security Vulnerabilities",
+    "labels": ["security", "critical"]
+  }
+}

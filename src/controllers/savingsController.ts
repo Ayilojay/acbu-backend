@@ -1,18 +1,15 @@
 import { Request, Response, NextFunction } from "express";
 import { acbuSavingsVaultService } from "../services/contracts";
-import { contractAddresses } from "../config/contracts";
+import { getContractAddresses } from "../config/contracts";
 import type { AuthRequest } from "../middleware/auth";
 import { AppError } from "../middleware/errorHandler";
-import {
-  isSavingsLockDate,
-  getNextSavingsWithdrawalDate,
-  getApyForTerm,
-} from "../config/savings";
+import { isSavingsLockDate, getNextSavingsWithdrawalDate, getApyForTerm } from "../config/savings";
 import {
   savingsDepositSchema,
   savingsWithdrawSchema,
   savingsPositionsSchema,
 } from "../validators/savingsValidator";
+import { formatIsoDateInTimeZone } from "../utils/dateUtils";
 
 export async function postSavingsDeposit(
   req: Request,
@@ -30,7 +27,7 @@ export async function postSavingsDeposit(
     const parsed = savingsDepositSchema.parse({ body: authReq.body });
     const amount = parsed.body.amount;
     const termSeconds = parsed.body.term_seconds;
-    if (!contractAddresses.savingsVault) {
+    if (!getContractAddresses().savingsVault) {
       throw new AppError("Savings vault contract not configured", 503);
     }
     const result = await acbuSavingsVaultService.deposit({
@@ -59,7 +56,7 @@ export async function postSavingsWithdraw(
         "Savings withdrawals are not allowed on this date. Next available withdrawal date below.",
         403,
         "SAVINGS_LOCK_DATE",
-        { next_available_withdrawal_date: nextDate.toISOString().slice(0, 10) },
+        { next_available_withdrawal_date: formatIsoDateInTimeZone(nextDate) },
       );
     }
 
@@ -73,7 +70,7 @@ export async function postSavingsWithdraw(
     const parsed = savingsWithdrawSchema.parse({ body: authReq.body });
     const amount = parsed.body.amount;
     const termSeconds = parsed.body.term_seconds;
-    if (!contractAddresses.savingsVault) {
+    if (!getContractAddresses().savingsVault) {
       throw new AppError("Savings vault contract not configured", 503);
     }
     const txHash = await acbuSavingsVaultService.withdraw({
@@ -102,7 +99,7 @@ export async function getSavingsPositions(
 
     const parsed = savingsPositionsSchema.parse({ query: authReq.query });
     const termSeconds = parsed.query.term_seconds;
-    if (!contractAddresses.savingsVault) {
+    if (!getContractAddresses().savingsVault) {
       throw new AppError("Savings vault contract not configured", 503);
     }
     const balance = await acbuSavingsVaultService.getBalance(
@@ -118,7 +115,7 @@ export async function getSavingsPositions(
       balance,
       apy_percent: apy,
       next_available_withdrawal_date: isSavingsLockDate()
-        ? nextDate.toISOString().slice(0, 10)
+        ? formatIsoDateInTimeZone(nextDate)
         : null,
     });
   } catch (e) {
@@ -135,7 +132,7 @@ export async function getNextWithdrawalDate(
   try {
     const nextDate = getNextSavingsWithdrawalDate();
     res.status(200).json({
-      next_available_withdrawal_date: nextDate.toISOString().slice(0, 10),
+      next_available_withdrawal_date: formatIsoDateInTimeZone(nextDate),
       is_locked_today: isSavingsLockDate(),
     });
   } catch (e) {

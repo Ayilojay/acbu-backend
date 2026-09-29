@@ -4,6 +4,9 @@ import { AuthRequest } from "../middleware/auth";
 import { createTransfer } from "../services/transfer/transferService";
 import { prisma } from "../config/database";
 import { AppError } from "../middleware/errorHandler";
+import { extractIdempotencyKey } from "../utils/idempotency";
+import { encodeCursor, decodeCursor } from "../middleware/pagination";
+import { getIfMatchHeader } from "../utils/walletConcurrency";
 
 export const createTransferSchema = z.object({
   to: z.string().min(1, "to is required"),
@@ -11,8 +14,7 @@ export const createTransferSchema = z.object({
     .string()
     .min(1, "amount_acbu is required")
     .refine((s) => /^\d+(\.\d{1,7})?$/.test(s) && Number(s) > 0, {
-      message:
-        "amount_acbu must be a positive number with up to 7 decimal places",
+      message: "amount_acbu must be a positive number with up to 7 decimal places",
     }),
   blockchain_tx_hash: z
     .string()
@@ -36,15 +38,18 @@ export async function postTransfers(
       throw new AppError("User-scoped API key required", 401);
     }
     const body = createTransferSchema.parse(req.body);
+    const idempotencyKey = extractIdempotencyKey(req);
     const result = await createTransfer(
       {
         senderUserId: userId,
         to: body.to.trim(),
         amountAcbu: body.amount_acbu.trim(),
+        idempotencyKey,
       },
       {
         // Legacy behavior: without hash, tx stays pending until key/worker is wired.
         submittedBlockchainTxHash: body.blockchain_tx_hash,
+        ifMatch: getIfMatchHeader(req),
       },
     );
     res.status(201).json({
@@ -101,6 +106,8 @@ export async function getTransfers(
       throw new AppError(msg, 400);
     }
     const { limit, cursor } = query.data;
+    // Decode the opaque, scope-bound cursor; rejects forged/cross-user cursors (#405).
+    const cursorId = decodeCursor(cursor, userId);
 
     const list = await prisma.transaction.findMany({
       where: {
@@ -116,7 +123,7 @@ export async function getTransfers(
       },
       orderBy: { createdAt: "desc" },
       take: limit + 1, // fetch one extra to determine if there's a next page
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
       select: {
         id: true,
         type: true,
@@ -133,7 +140,7 @@ export async function getTransfers(
 
     const hasMore = list.length > limit;
     const page = hasMore ? list.slice(0, limit) : list;
-    const nextCursor = hasMore ? page[page.length - 1].id : null;
+    const nextCursor = hasMore ? encodeCursor(page[page.length - 1].id, userId) : null;
 
     const items = page.map((t: (typeof page)[number]) => ({
       transaction_id: t.id,
@@ -207,8 +214,7 @@ export async function getTransferById(
       amount_acbu: tx.acbuAmount?.toString() ?? null,
       local_currency: tx.localCurrency ?? null,
       local_amount: tx.localAmount?.toString() ?? null,
-      recipient_address:
-        tx.type === "transfer" ? (tx.recipientAddress ?? null) : null,
+      recipient_address: tx.type === "transfer" ? (tx.recipientAddress ?? null) : null,
       blockchain_tx_hash: tx.blockchainTxHash ?? undefined,
       created_at: tx.createdAt.toISOString(),
       completed_at: tx.completedAt?.toISOString() ?? undefined,

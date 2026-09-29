@@ -1,6 +1,8 @@
-import axios, { AxiosInstance } from "axios";
+import { AxiosInstance } from "axios";
 import { config } from "../../config/env";
 import { logger } from "../../config/logger";
+import { CircuitBreaker } from "../../utils/circuitBreaker";
+import { createHttpClient } from "../http/client";
 import type {
   FintechProvider,
   DisburseRecipient,
@@ -10,18 +12,25 @@ import type {
 
 export class FlutterwaveClient implements FintechProvider {
   private client: AxiosInstance;
+  private breaker: CircuitBreaker;
 
   constructor() {
-    this.client = axios.create({
+    this.client = createHttpClient({
       baseURL: config.flutterwave.baseUrl,
       headers: {
         Authorization: `Bearer ${config.flutterwave.secretKey}`,
         "Content-Type": "application/json",
       },
-      timeout: 30000,
     });
 
-    // Request interceptor
+    // REQUIREMENT 2: Create a dedicated circuit breaker for Flutterwave
+    this.breaker = new CircuitBreaker({
+      failureThreshold: 5,
+      cooldownMs: 30000, // 30 seconds cooldown
+      successThreshold: 2,
+    });
+
+    // Request interceptor (kept exactly as you have it)
     this.client.interceptors.request.use(
       (requestConfig) => {
         logger.debug("Flutterwave API Request", {
@@ -36,7 +45,7 @@ export class FlutterwaveClient implements FintechProvider {
       },
     );
 
-    // Response interceptor
+    // Response interceptor (kept exactly as you have it)
     this.client.interceptors.response.use(
       (response) => {
         logger.debug("Flutterwave API Response", {
@@ -57,13 +66,29 @@ export class FlutterwaveClient implements FintechProvider {
   }
 
   /**
+   * Execute a request through the circuit breaker.
+   * Retry-After-aware retries are handled by the shared HTTP client interceptor.
+   */
+  private async requestWrapper<T>(requestFn: () => Promise<T>): Promise<T> {
+    if (!this.breaker.canExecute()) {
+      throw new Error("Flutterwave service is temporarily unavailable (Circuit Open)");
+    }
+    try {
+      const result = await requestFn();
+      this.breaker.recordSuccess();
+      return result;
+    } catch (error) {
+      this.breaker.recordFailure();
+      throw error;
+    }
+  }
+
+  /**
    * Get account balance for a specific currency
    */
   async getBalance(currency: string): Promise<number> {
     try {
-      // This will be implemented with actual Flutterwave API endpoint
-      // For now, this is the structure
-      const response = await this.client.get(`/balances/${currency}`);
+      const response = await this.requestWrapper(() => this.client.get(`/balances/${currency}`));
       return parseFloat(response.data.data.balance);
     } catch (error) {
       logger.error("Failed to get balance from Flutterwave", {
@@ -83,11 +108,13 @@ export class FlutterwaveClient implements FintechProvider {
     toCurrency: string,
   ): Promise<ConvertCurrencyResult> {
     try {
-      const response = await this.client.post("/currency/conversions", {
-        amount,
-        from: fromCurrency,
-        to: toCurrency,
-      });
+      const response = await this.requestWrapper(() =>
+        this.client.post("/currency/conversions", {
+          amount,
+          from: fromCurrency,
+          to: toCurrency,
+        }),
+      );
       return {
         amount: parseFloat(response.data.data.amount),
         rate: parseFloat(response.data.data.rate),
@@ -112,14 +139,16 @@ export class FlutterwaveClient implements FintechProvider {
     recipient: DisburseRecipient,
   ): Promise<DisburseResult> {
     try {
-      const response = await this.client.post("/transfers", {
-        account_bank: recipient.bankCode,
-        account_number: recipient.accountNumber,
-        amount,
-        currency,
-        narration: "ACBU withdrawal",
-        beneficiary_name: recipient.accountName,
-      });
+      const response = await this.requestWrapper(() =>
+        this.client.post("/transfers", {
+          account_bank: recipient.bankCode,
+          account_number: recipient.accountNumber,
+          amount,
+          currency,
+          narration: "ACBU withdrawal",
+          beneficiary_name: recipient.accountName,
+        }),
+      );
 
       return {
         transactionId: response.data.data.id,
@@ -139,5 +168,4 @@ export class FlutterwaveClient implements FintechProvider {
 
 const client = new FlutterwaveClient();
 export const flutterwaveClient = client;
-/** Flutterwave as FintechProvider for the router */
 export const flutterwaveProvider: FintechProvider = client;

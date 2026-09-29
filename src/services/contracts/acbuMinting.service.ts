@@ -1,4 +1,5 @@
 import { xdr } from "@stellar/stellar-sdk";
+import { prisma } from "../../config/database";
 import { contractClient, ContractClient } from "../stellar/contractClient";
 import { stellarClient } from "../stellar/client";
 import { logger } from "../../config/logger";
@@ -17,18 +18,21 @@ function currencyCodeToScVal(code: string): xdr.ScVal {
 }
 
 export interface MintFromUsdcParams {
+  txId?: string;
   user: string; // The caller/payer address
   usdcAmount: string; // Amount in smallest unit (7 decimals)
   recipient: string; // Stellar address to receive ACBU
 }
 
 export interface MintFromBasketParams {
+  txId?: string;
   user: string;
   recipient: string;
   acbuAmount: string;
 }
 
 export interface MintFromSingleParams {
+  txId?: string;
   user: string;
   recipient: string;
   currency: string;
@@ -37,6 +41,7 @@ export interface MintFromSingleParams {
 
 /** Custodial mint: operator key signs; pulls demo fiat from minting contract custody. */
 export interface MintFromDemoFiatParams {
+  txId?: string;
   operator: string;
   recipient: string;
   currency: string;
@@ -44,6 +49,7 @@ export interface MintFromDemoFiatParams {
 }
 
 export interface AdminDripDemoFiatParams {
+  txId?: string;
   recipient: string;
   currency: string;
   amount: string;
@@ -101,6 +107,17 @@ export class MintingService {
         acbuAmount: acbuAmount.toString(),
       };
     } catch (error) {
+      if ((params as any).txId) {
+        try {
+          await prisma.transaction.update({
+            where: { id: (params as any).txId },
+            data: { status: "failed" },
+          });
+          logger.info(`Compensated: Marked transaction ${(params as any).txId} as FAILED`);
+        } catch (dbError) {
+          logger.error("CRITICAL: DB compensation failed", { txId: (params as any).txId, dbError });
+        }
+      }
       logger.error("Failed to mint from USDC", { params, error });
       throw error;
     }
@@ -149,6 +166,17 @@ export class MintingService {
         acbuAmount: acbuAmount.toString(),
       };
     } catch (error) {
+      if ((params as any).txId) {
+        try {
+          await prisma.transaction.update({
+            where: { id: (params as any).txId },
+            data: { status: "failed" },
+          });
+          logger.info(`Compensated: Marked transaction ${(params as any).txId} as FAILED`);
+        } catch (dbError) {
+          logger.error("CRITICAL: DB compensation failed", { txId: (params as any).txId, dbError });
+        }
+      }
       logger.error("Failed to mint from basket", { params, error });
       throw error;
     }
@@ -198,6 +226,17 @@ export class MintingService {
         acbuAmount: acbuAmount.toString(),
       };
     } catch (error) {
+      if ((params as any).txId) {
+        try {
+          await prisma.transaction.update({
+            where: { id: (params as any).txId },
+            data: { status: "failed" },
+          });
+          logger.info(`Compensated: Marked transaction ${(params as any).txId} as FAILED`);
+        } catch (dbError) {
+          logger.error("CRITICAL: DB compensation failed", { txId: (params as any).txId, dbError });
+        }
+      }
       logger.error("Failed to mint from single", { params, error });
       throw error;
     }
@@ -245,6 +284,17 @@ export class MintingService {
         acbuAmount: acbuAmount.toString(),
       };
     } catch (error) {
+      if ((params as any).txId) {
+        try {
+          await prisma.transaction.update({
+            where: { id: (params as any).txId },
+            data: { status: "failed" },
+          });
+          logger.info(`Compensated: Marked transaction ${(params as any).txId} as FAILED`);
+        } catch (dbError) {
+          logger.error("CRITICAL: DB compensation failed", { txId: (params as any).txId, dbError });
+        }
+      }
       logger.error("Failed mint_from_demo_fiat", { params, error });
       throw error;
     }
@@ -279,6 +329,17 @@ export class MintingService {
 
       return { transactionHash: result.transactionHash };
     } catch (error) {
+      if ((params as any).txId) {
+        try {
+          await prisma.transaction.update({
+            where: { id: (params as any).txId },
+            data: { status: "failed" },
+          });
+          logger.info(`Compensated: Marked transaction ${(params as any).txId} as FAILED`);
+        } catch (dbError) {
+          logger.error("CRITICAL: DB compensation failed", { txId: (params as any).txId, dbError });
+        }
+      }
       logger.error("Failed admin_drip_demo_fiat", { params, error });
       throw error;
     }
@@ -289,11 +350,7 @@ export class MintingService {
    */
   async getFeeRate(): Promise<number> {
     try {
-      const result = await this.contractClient.readContract(
-        this.contractId,
-        "get_fee_rate",
-        [],
-      );
+      const result = await this.contractClient.readContract(this.contractId, "get_fee_rate", []);
 
       const feeRate = ContractClient.fromScVal(result);
       return Number(feeRate);
@@ -304,15 +361,29 @@ export class MintingService {
   }
 
   /**
+   * Get total ACBU supply minted on-chain.
+   */
+  async getTotalSupply(): Promise<string> {
+    try {
+      const result = await this.contractClient.readContract(
+        this.contractId,
+        "get_total_supply",
+        [],
+      );
+
+      return ContractClient.fromScVal(result).toString();
+    } catch (error) {
+      logger.error("Failed to get total supply", { error });
+      throw error;
+    }
+  }
+
+  /**
    * Check if contract is paused
    */
   async isPaused(): Promise<boolean> {
     try {
-      const result = await this.contractClient.readContract(
-        this.contractId,
-        "is_paused",
-        [],
-      );
+      const result = await this.contractClient.readContract(this.contractId, "is_paused", []);
 
       return ContractClient.fromScVal(result) as boolean;
     } catch (error) {

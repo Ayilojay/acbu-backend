@@ -1,18 +1,22 @@
-import amqp, { Channel, ChannelModel } from "amqplib";
+import amqp, { ChannelModel, ConfirmChannel } from "amqplib";
 import { config } from "./env";
 import { logger } from "./logger";
 
 let connection: ChannelModel | null = null;
-let channel: Channel | null = null;
+let channel: ConfirmChannel | null = null;
 
-export async function connectRabbitMQ(): Promise<Channel> {
+export async function connectRabbitMQ(): Promise<ConfirmChannel> {
   if (channel) {
     return channel;
   }
 
   try {
-    connection = await amqp.connect(config.rabbitmqUrl);
-    const ch = await connection.createChannel();
+    // Heartbeat of 30 s ensures the client detects silent TCP drops within one
+    // heartbeat interval rather than waiting for the next publish attempt.
+    // Network appliances that drop idle connections after 60 s are covered
+    // because the client sends a frame every 30 s.
+    connection = await amqp.connect(config.rabbitmqUrl, { heartbeat: 30 });
+    const ch = await connection.createConfirmChannel();
     channel = ch;
     logger.info("RabbitMQ connected successfully");
 
@@ -67,6 +71,12 @@ export async function assertQueueWithDLQ(
 
 export async function disconnectRabbitMQ(): Promise<void> {
   if (channel) {
+    try {
+      await channel.waitForConfirms();
+      logger.info("All in-flight producer confirms resolved");
+    } catch (err) {
+      logger.error("Error waiting for RabbitMQ producer confirms", err);
+    }
     await channel.close();
     channel = null;
   }
@@ -77,7 +87,7 @@ export async function disconnectRabbitMQ(): Promise<void> {
   }
 }
 
-export function getRabbitMQChannel(): Channel {
+export function getRabbitMQChannel(): ConfirmChannel {
   if (!channel) {
     logger.warn("RabbitMQ not connected, throwing error on channel request");
     throw new Error("RabbitMQ not connected. Call connectRabbitMQ() first.");

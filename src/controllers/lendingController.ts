@@ -1,20 +1,20 @@
-import { Request, Response, NextFunction } from "express";
+import { Response, NextFunction } from "express";
 import { acbuLendingPoolService } from "../services/contracts";
-import { contractAddresses } from "../config/contracts";
+import { getContractAddresses } from "../config/contracts";
 import type { AuthRequest } from "../middleware/auth";
 import { AppError } from "../middleware/errorHandler";
 
 export async function postLendingDeposit(
-  req: Request,
+  req: AuthRequest,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { lender, amount } = (req as AuthRequest).body || {};
+    const { lender, amount } = req.body || {};
     if (!lender || !amount) {
       throw new AppError("lender and amount required", 400);
     }
-    if (!contractAddresses.lendingPool) {
+    if (!getContractAddresses().lendingPool) {
       throw new AppError("Lending pool contract not configured", 503);
     }
     const result = await acbuLendingPoolService.deposit({
@@ -31,16 +31,16 @@ export async function postLendingDeposit(
 }
 
 export async function postLendingWithdraw(
-  req: Request,
+  req: AuthRequest,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { lender, amount } = (req as AuthRequest).body || {};
+    const { lender, amount } = req.body || {};
     if (!lender || !amount) {
       throw new AppError("lender and amount required", 400);
     }
-    const txHash = await (acbuLendingPoolService as any).withdraw({
+    const txHash = await acbuLendingPoolService.withdraw({
       lender,
       amount: String(amount),
     });
@@ -51,16 +51,16 @@ export async function postLendingWithdraw(
 }
 
 export async function getLendingBalance(
-  req: Request,
+  req: AuthRequest,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
-    const lender = (req as AuthRequest).query?.lender as string;
+    const lender = req.query?.lender as string;
     if (!lender) {
       throw new AppError("query lender required", 400);
     }
-    if (!contractAddresses.lendingPool) {
+    if (!getContractAddresses().lendingPool) {
       throw new AppError("Lending pool contract not configured", 503);
     }
     const balance = await acbuLendingPoolService.getBalance(lender);

@@ -1,19 +1,21 @@
 import { prisma } from "../../config/database";
 import { BASKET_CURRENCIES, type BasketCurrency } from "../../config/basket";
 import { Decimal } from "@prisma/client/runtime/library";
-import {
-  acbuBurningService,
-  acbuMintingService,
-  acbuOracleService,
-} from "../contracts";
+import { getLatestAcbuRate } from "../rates/acbuRateCache";
+import { acbuBurningService, acbuMintingService, acbuOracleService } from "../contracts";
 import { stellarClient } from "../stellar/client";
 import { getContractAddresses } from "../../config/contracts";
 import { decryptUserStellarSecret } from "../wallet/stellarSecretService";
-import {
-  ensureAcbuTrustline,
-  ensureDemoFiatTrustline,
-} from "../stellar/trustlineService";
+import { ensureAcbuTrustline, ensureDemoFiatTrustline } from "../stellar/trustlineService";
 import { ensureAccountActivated } from "../stellar/activationService";
+import {
+  InvalidCurrencyError,
+  InvalidMintAmountError,
+  InvalidCurrencyForOnRampError,
+  TrustlineMissingError,
+  NonExistentContractFunctionError,
+  ValidationError,
+} from "../../errors/index";
 
 const DECIMALS_7 = 1e7;
 const DECIMALS_7_BIGINT = 10_000_000n;
@@ -23,13 +25,13 @@ const MAX_MINT_USD_7 = 1_000_000_000_000n; // 100,000 USD in 7-dec fixed point
 function assertMintingConfigured(): void {
   const { minting } = getContractAddresses();
   if (!minting) {
-    throw new Error("Minting contract not configured (CONTRACT_MINTING)");
+    throw new ValidationError("Minting contract not configured (CONTRACT_MINTING)");
   }
 }
 
 function wholeFiatToI128(amount: number): string {
   if (!Number.isFinite(amount) || amount <= 0) {
-    throw new Error("Invalid fiat amount");
+    throw new ValidationError("Invalid fiat amount");
   }
   return String(Math.round(amount * DECIMALS_7));
 }
@@ -42,10 +44,7 @@ function divCeil(a: bigint, b: bigint): bigint {
  * Pre-validate demo fiat mint bounds using current on-chain oracle rate so we can
  * return a clean 400 instead of a generic Soroban simulation error.
  */
-async function validateDemoMintAmount(
-  currency: string,
-  fiatAmountI128: string,
-): Promise<void> {
+async function validateDemoMintAmount(currency: string, fiatAmountI128: string): Promise<void> {
   try {
     const rate = BigInt(await acbuOracleService.getRate(currency));
     if (rate <= 0n) return; // Let on-chain path surface invalid-rate if needed.
@@ -64,12 +63,12 @@ async function validateDemoMintAmount(
     const requestedFiat = Number(fiatAmountI128) / DECIMALS_7;
     const usdApprox = Number(usdGross) / DECIMALS_7;
 
-    throw new Error(
+    throw new InvalidMintAmountError(
       `Invalid mint amount for ${currency}: ${requestedFiat} converts to ~${usdApprox.toFixed(2)} USD. Allowed range is ${minFiat.toFixed(2)} to ${maxFiat.toFixed(2)} ${currency}.`,
     );
   } catch (e) {
     // Bubble only intentional validation errors; ignore pre-check network issues.
-    if (e instanceof Error && e.message.startsWith("Invalid mint amount for")) {
+    if (e instanceof InvalidMintAmountError) {
       throw e;
     }
   }
@@ -88,9 +87,7 @@ export type FiatAccountView = {
 /**
  * Soroban custodial demo fiat: no simulated bank. Returns one row per basket currency for UI compatibility.
  */
-export async function getBankAccounts(
-  userId: string,
-): Promise<FiatAccountView[]> {
+export async function getBankAccounts(userId: string): Promise<FiatAccountView[]> {
   const [user, faucetRows, latestRates] = await Promise.all([
     prisma.user.findUnique({
       where: { id: userId },
@@ -101,25 +98,25 @@ export async function getBankAccounts(
         userId,
         type: "mint",
         status: "completed",
-        localCurrency: { in: BASKET_CURRENCIES },
+        localCurrency: { in: [...BASKET_CURRENCIES] },
         localAmount: { not: null },
         rateSnapshot: { path: ["source"], equals: "admin_drip_demo_fiat" },
       },
+      take: 1_000, // #437: cap per-user faucet rows
       select: {
         localCurrency: true,
         localAmount: true,
       },
     }),
     prisma.oracleRate.findMany({
-      where: { currency: { in: BASKET_CURRENCIES } },
+      where: { currency: { in: [...BASKET_CURRENCIES] } },
       orderBy: { timestamp: "desc" },
       distinct: ["currency"],
       select: { currency: true, rateUsd: true },
     }),
   ]);
 
-  const suffix =
-    user?.username || user?.phoneE164 || user?.id.slice(0, 8) || "user";
+  const suffix = user?.username || user?.phoneE164 || user?.id.slice(0, 8) || "user";
 
   const balances = new Map<string, number>();
   for (const c of BASKET_CURRENCIES) balances.set(c, 0);
@@ -166,11 +163,11 @@ export async function requestFaucet(
   transaction_hash: string;
 }> {
   if (!BASKET_CURRENCIES.includes(currency as BasketCurrency)) {
-    throw new Error("Invalid currency for demo fiat faucet.");
+    throw new InvalidCurrencyError(currency);
   }
 
   if (amount <= 0 || amount > 10_000_000) {
-    throw new Error("Invalid amount (must be > 0 and <= 10000000).");
+    throw new ValidationError("Invalid amount (must be > 0 and <= 10000000).");
   }
 
   assertMintingConfigured();
@@ -192,7 +189,7 @@ export async function requestFaucet(
     }
   }
   if (!stellarAddress) {
-    throw new Error("User wallet address not set (and no recipient provided).");
+    throw new ValidationError("User wallet address not set (and no recipient provided).");
   }
 
   // Ensure the recipient account exists on-chain (testnet: newly generated addresses need funding).
@@ -223,19 +220,17 @@ export async function requestFaucet(
     }));
   } catch (e) {
     // If the user has no trustline yet, try to add it (if passcode available) and retry once.
-    if (
-      passcode &&
-      e instanceof Error &&
-      e.message.includes("trustline entry is missing")
-    ) {
+    if (passcode && e instanceof Error && e.message.includes("trustline entry is missing")) {
       const secret = await decryptUserStellarSecret(userId, passcode);
-      if (!secret) throw e;
+      if (!secret) throw new TrustlineMissingError(e.message);
       await ensureDemoFiatTrustline({ userSecret: secret, currency });
       ({ transactionHash } = await acbuMintingService.adminDripDemoFiat({
         recipient: stellarAddress,
         currency,
         amount: amountI128,
       }));
+    } else if (e instanceof Error && e.message.includes("non-existent contract function")) {
+      throw new NonExistentContractFunctionError();
     } else {
       throw e;
     }
@@ -289,16 +284,16 @@ export async function simulateOnRamp(
 
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user?.stellarAddress) {
-    throw new Error("User wallet address not set");
+    throw new ValidationError("User wallet address not set");
   }
 
   if (!BASKET_CURRENCIES.includes(currency as BasketCurrency)) {
-    throw new Error("Invalid currency for on-ramp.");
+    throw new InvalidCurrencyForOnRampError();
   }
 
   const sourceAccount = stellarClient.getKeypair()?.publicKey();
   if (!sourceAccount) {
-    throw new Error("No Stellar source account (STELLAR_SECRET_KEY)");
+    throw new ValidationError("No Stellar source account (STELLAR_SECRET_KEY)");
   }
 
   const fiatAmountI128 = wholeFiatToI128(fiatAmount);
@@ -356,11 +351,7 @@ export async function simulateOnRamp(
     };
   } catch (err: unknown) {
     // Retry once after auto-adding ACBU trustline (same resilience pattern as faucet).
-    if (
-      passcode &&
-      err instanceof Error &&
-      err.message.includes("trustline entry is missing")
-    ) {
+    if (passcode && err instanceof Error && err.message.includes("trustline entry is missing")) {
       const secret = await decryptUserStellarSecret(userId, passcode);
       if (secret) {
         await ensureAcbuTrustline({ userSecret: secret });
@@ -386,6 +377,10 @@ export async function simulateOnRamp(
           blockchain_tx_hash: retry.transactionHash,
         };
       }
+      throw new TrustlineMissingError(err.message);
+    }
+    if (err instanceof Error && err.message.includes("non-existent contract function")) {
+      throw new NonExistentContractFunctionError();
     }
 
     const message = err instanceof Error ? err.message : String(err);
@@ -421,25 +416,16 @@ export async function simulateOffRamp(
 }> {
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user?.stellarAddress) {
-    throw new Error("User wallet address not set");
+    throw new ValidationError("User wallet address not set");
   }
 
-  const acbuRateRecord = await prisma.acbuRate.findFirst({
-    orderBy: { timestamp: "desc" },
-  });
-  if (!acbuRateRecord) {
-    throw new Error("ACBU rates not available");
-  }
+  const acbuRateRecord = await getLatestAcbuRate();
 
   const rateKey =
     `acbu${currency.charAt(0).toUpperCase() + currency.slice(1).toLowerCase()}` as keyof typeof acbuRateRecord;
   const acbuPerLocal = acbuRateRecord[rateKey];
 
-  if (
-    !acbuPerLocal ||
-    typeof acbuPerLocal !== "object" ||
-    !("toNumber" in acbuPerLocal)
-  ) {
+  if (!acbuPerLocal || typeof acbuPerLocal !== "object" || !("toNumber" in acbuPerLocal)) {
     throw new Error(`Rate not found for currency ${currency}`);
   }
 

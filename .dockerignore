@@ -1,0 +1,45 @@
+# Dependency directories
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment variables & Secrets
+.env
+.env.*
+!.env.example
+!.env.test
+
+# Git, CI/CD, and IDE configurations
+.git
+.gitignore
+.github/
+.idea/
+.vscode/
+
+# Testing and Coverage
+coverage/
+.nyc_output/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Documentation
+docs/
+/*.md
+
+# Misc project directories not needed in production container
+scratch/
+tests/
+acbu-frontend/

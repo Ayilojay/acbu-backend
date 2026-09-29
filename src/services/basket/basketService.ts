@@ -4,7 +4,7 @@
  * Fallback: if no active BasketConfig (e.g. before seed), uses DEFAULT_BASKET from config for seed compatibility.
  */
 import { prisma } from "../../config/database";
-import { BASKET_CURRENCIES, BASKET_WEIGHTS } from "../../config/basket";
+import { BASKET_CURRENCIES, BASKET_WEIGHTS, BASKET_WEIGHT_BASIS_POINTS } from "../../config/basket";
 
 export interface BasketEntry {
   currency: string;
@@ -36,19 +36,27 @@ export class BasketService {
 
     const latestEffectiveFrom = rows[0].effectiveFrom;
     const currentRows = rows.filter(
-      (r: (typeof rows)[0]) =>
-        r.effectiveFrom.getTime() === latestEffectiveFrom.getTime(),
+      (r: (typeof rows)[0]) => r.effectiveFrom.getTime() === latestEffectiveFrom.getTime(),
     );
 
     const sum = currentRows.reduce(
       (s: number, r: (typeof currentRows)[0]) => s + r.weight.toNumber(),
       0,
     );
-    const scale = sum > 0 ? 100 / sum : 1;
+
+    // Validate that weights stored in DB sum exactly to 100.00% (10000 basis points).
+    // Stored weights are Decimal(5,2) representing percent points; multiply by 100
+    // to obtain basis points and compare after rounding to avoid floating noise.
+    const sumBps = Math.round(sum * 100);
+    if (sumBps !== BASKET_WEIGHT_BASIS_POINTS) {
+      throw new Error(
+        `Invalid active BasketConfig weights: sum ${sumBps} bps != expected ${BASKET_WEIGHT_BASIS_POINTS} bps`,
+      );
+    }
 
     return currentRows.map((r: (typeof currentRows)[0]) => ({
       currency: r.currency,
-      weight: Math.round(r.weight.toNumber() * scale * 100) / 100,
+      weight: Math.round(r.weight.toNumber() * 100) / 100,
     }));
   }
 
@@ -70,19 +78,21 @@ export class BasketService {
 
     const latestEffectiveFrom = rows[0].effectiveFrom;
     const asOfRows = rows.filter(
-      (r: (typeof rows)[0]) =>
-        r.effectiveFrom.getTime() === latestEffectiveFrom.getTime(),
+      (r: (typeof rows)[0]) => r.effectiveFrom.getTime() === latestEffectiveFrom.getTime(),
     );
 
-    const sum = asOfRows.reduce(
-      (s: number, r: (typeof asOfRows)[0]) => s + r.weight.toNumber(),
-      0,
-    );
-    const scale = sum > 0 ? 100 / sum : 1;
+    const sum = asOfRows.reduce((s: number, r: (typeof asOfRows)[0]) => s + r.weight.toNumber(), 0);
+
+    const sumBps = Math.round(sum * 100);
+    if (sumBps !== BASKET_WEIGHT_BASIS_POINTS) {
+      throw new Error(
+        `Invalid active BasketConfig weights as-of ${date.toISOString()}: sum ${sumBps} bps != expected ${BASKET_WEIGHT_BASIS_POINTS} bps`,
+      );
+    }
 
     return asOfRows.map((r: (typeof asOfRows)[0]) => ({
       currency: r.currency,
-      weight: Math.round(r.weight.toNumber() * scale * 100) / 100,
+      weight: Math.round(r.weight.toNumber() * 100) / 100,
     }));
   }
 

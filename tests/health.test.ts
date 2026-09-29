@@ -11,6 +11,7 @@ const mockPing = jest.fn();
 const mockGetMongoDB = jest.fn();
 const mockGetRabbitMQChannel = jest.fn();
 const mockDisconnect = jest.fn();
+const mockStellarRoot = jest.fn();
 
 // ── Mock every module that gets transitively loaded ───────────────────────────
 
@@ -47,11 +48,11 @@ jest.mock("../src/config/logger", () => ({
 }));
 
 jest.mock("../src/config/database", () => ({
-  prisma: { 
+  prisma: {
     $queryRaw: mockQueryRaw,
     $disconnect: mockDisconnect,
   },
-  default: { 
+  default: {
     $queryRaw: mockQueryRaw,
     $disconnect: mockDisconnect,
   },
@@ -70,8 +71,20 @@ jest.mock("../src/config/rabbitmq", () => ({
   getRabbitMQConnection: jest.fn(),
 }));
 
+jest.mock("../src/services/stellar/client", () => ({
+  stellarClient: {
+    getServer: jest.fn(() => ({
+      root: mockStellarRoot,
+    })),
+  },
+}));
+
+jest.mock("../src/services/stellar/eventListener", () => ({
+  eventListenerHealth: { status: "up", lastError: null },
+}));
+
 // ── Import SUT after mocks are in place ───────────────────────────────────────
-import { getHealthReport } from "../src/services/health/healthService";
+import { getHealthReport, markStartupComplete } from "../src/services/health/healthService";
 import { prisma } from "../src/config/database";
 import { disconnectMongoDB } from "../src/config/mongodb";
 import { disconnectRabbitMQ } from "../src/config/rabbitmq";
@@ -83,7 +96,8 @@ function setupHealthyDeps() {
     admin: () => ({ ping: mockPing }),
   });
   mockPing.mockResolvedValue({ ok: 1 });
-  mockGetRabbitMQChannel.mockReturnValue({ /* live channel stub */ });
+  mockGetRabbitMQChannel.mockReturnValue({});
+  mockStellarRoot.mockResolvedValue({});
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -98,6 +112,7 @@ describe("getHealthReport", () => {
 
   it("returns status 'up' when all dependencies are healthy", async () => {
     setupHealthyDeps();
+    markStartupComplete();
 
     const report = await getHealthReport();
 
@@ -105,6 +120,7 @@ describe("getHealthReport", () => {
     expect(report.details.postgres.status).toBe("up");
     expect(report.details.mongodb.status).toBe("up");
     expect(report.details.rabbitmq.status).toBe("up");
+    expect(report.details.stellarHorizon.status).toBe("up");
     expect(report.timestamp).toBeTruthy();
     expect(typeof report.uptime).toBe("number");
   });
@@ -116,15 +132,16 @@ describe("getHealthReport", () => {
     });
     mockPing.mockResolvedValue({ ok: 1 });
     mockGetRabbitMQChannel.mockReturnValue({});
+    mockStellarRoot.mockResolvedValue({});
 
     const report = await getHealthReport();
 
     expect(report.status).toBe("down");
     expect(report.details.postgres.status).toBe("down");
     expect(report.details.postgres.error).toBe("PostgreSQL unreachable");
-    // other deps unaffected
     expect(report.details.mongodb.status).toBe("up");
     expect(report.details.rabbitmq.status).toBe("up");
+    expect(report.details.stellarHorizon.status).toBe("up");
   });
 
   it("returns status 'down' when MongoDB is unreachable", async () => {
@@ -133,6 +150,7 @@ describe("getHealthReport", () => {
       throw new Error("MongoNetworkError: connect ECONNREFUSED");
     });
     mockGetRabbitMQChannel.mockReturnValue({});
+    mockStellarRoot.mockResolvedValue({});
 
     const report = await getHealthReport();
 
@@ -150,6 +168,7 @@ describe("getHealthReport", () => {
     mockGetRabbitMQChannel.mockImplementation(() => {
       throw new Error("RabbitMQ not connected. Call connectRabbitMQ() first.");
     });
+    mockStellarRoot.mockResolvedValue({});
 
     const report = await getHealthReport();
 
@@ -158,8 +177,23 @@ describe("getHealthReport", () => {
     expect(report.details.rabbitmq.error).toBe("RabbitMQ unreachable");
   });
 
+  it("returns 'down' when Stellar Horizon is unreachable", async () => {
+    mockQueryRaw.mockResolvedValue([{ "?column?": 1 }]);
+    mockGetMongoDB.mockReturnValue({
+      admin: () => ({ ping: mockPing }),
+    });
+    mockPing.mockResolvedValue({ ok: 1 });
+    mockGetRabbitMQChannel.mockReturnValue({});
+    mockStellarRoot.mockRejectedValue(new Error("Connection refused"));
+
+    const report = await getHealthReport();
+
+    expect(report.status).toBe("down");
+    expect(report.details.stellarHorizon.status).toBe("down");
+    expect(report.details.stellarHorizon.error).toBe("Stellar Horizon unreachable");
+  });
+
   it("returns 'down' when a check exceeds the 2s timeout", async () => {
-    // Simulate a hung query that never resolves within timeout
     mockQueryRaw.mockImplementation(
       () => new Promise((resolve) => setTimeout(resolve, 10_000)),
     );
@@ -168,6 +202,7 @@ describe("getHealthReport", () => {
     });
     mockPing.mockResolvedValue({ ok: 1 });
     mockGetRabbitMQChannel.mockReturnValue({});
+    mockStellarRoot.mockResolvedValue({});
 
     const report = await getHealthReport();
 
@@ -175,18 +210,31 @@ describe("getHealthReport", () => {
     expect(report.details.postgres.status).toBe("down");
   }, 10_000);
 
+  it("returns 'down' when Stellar Horizon times out", async () => {
+    mockQueryRaw.mockResolvedValue([{ "?column?": 1 }]);
+    mockGetMongoDB.mockReturnValue({
+      admin: () => ({ ping: mockPing }),
+    });
+    mockPing.mockResolvedValue({ ok: 1 });
+    mockGetRabbitMQChannel.mockReturnValue({});
+    mockStellarRoot.mockImplementation(
+      () => new Promise((resolve) => setTimeout(resolve, 10_000)),
+    );
+
+    const report = await getHealthReport();
+
+    expect(report.status).toBe("down");
+    expect(report.details.stellarHorizon.status).toBe("down");
+    expect(report.details.stellarHorizon.error).toBe("Stellar Horizon unreachable");
+  }, 10_000);
+
   afterAll(async () => {
-    // Close DB pool
     if (prisma?.$disconnect) await prisma.$disconnect();
 
-    // Close MongoDB connection
-    // Note: Project uses disconnectMongoDB helper instead of mongoose.connection.close
     await disconnectMongoDB();
 
-    // Close RabbitMQ connection if it exists
     await disconnectRabbitMQ();
 
-    // Clear any remaining timeouts
     jest.useRealTimers();
   });
 });

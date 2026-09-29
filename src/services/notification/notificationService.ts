@@ -14,14 +14,21 @@
 import axios from "axios";
 import { config } from "../../config/env";
 import { logger } from "../../config/logger";
+import { sendSmtpEmail, sendSmtpEmailBatch, type SmtpEmailMessage } from "../email";
 
 const cfg = config.notification;
 
-export async function sendEmail(
-  to: string,
-  subject: string,
-  body: string,
-): Promise<void> {
+export async function sendEmail(to: string, subject: string, body: string): Promise<void> {
+  if (cfg.emailProvider === "smtp") {
+    try {
+      await sendSmtpEmail(to, subject, body);
+      logger.info("Email sent via SMTP", { to: to ? "***" : undefined });
+    } catch (e) {
+      logger.error("SMTP send failed", { error: e });
+      throw e;
+    }
+    return;
+  }
   if (cfg.emailProvider === "log") {
     logger.info("NotificationService (email log)", {
       to: process.env.NODE_ENV === "production" ? (to ? "***" : undefined) : to,
@@ -59,12 +66,15 @@ export async function sendEmail(
   }
   if (cfg.emailProvider === "ses" && cfg.sesAccessKeyId && cfg.sesSecretAccessKey) {
     try {
-      // AWS SigV4 signing is complex to implement manually. 
+      // AWS SigV4 signing is complex to implement manually.
       // For reliability and production readiness, we recommend installing @aws-sdk/client-ses.
       // Example command: pnpm add @aws-sdk/client-ses
-      logger.warn("SES provider configured but @aws-sdk/client-ses is recommended for production SigV4 signing.", {
-        to: to ? "***" : undefined,
-      });
+      logger.warn(
+        "SES provider configured but @aws-sdk/client-ses is recommended for production SigV4 signing.",
+        {
+          to: to ? "***" : undefined,
+        },
+      );
 
       // Placeholder for actual SDK call or signed request
       throw new Error("SES provider requires @aws-sdk/client-ses for secure communication.");
@@ -82,6 +92,27 @@ export async function sendEmail(
   });
 }
 
+export async function sendEmailBatch(messages: SmtpEmailMessage[]): Promise<void> {
+  if (messages.length === 0) {
+    return;
+  }
+
+  if (cfg.emailProvider === "smtp") {
+    try {
+      await sendSmtpEmailBatch(messages);
+      logger.info("Email batch sent via SMTP", { count: messages.length });
+    } catch (e) {
+      logger.error("SMTP batch send failed", { error: e, count: messages.length });
+      throw e;
+    }
+    return;
+  }
+
+  for (const message of messages) {
+    await sendEmail(message.to, message.subject, message.body);
+  }
+}
+
 export async function sendSms(to: string, body: string): Promise<void> {
   if (cfg.smsProvider === "log") {
     logger.info("NotificationService (SMS log)", {
@@ -96,9 +127,7 @@ export async function sendSms(to: string, body: string): Promise<void> {
     cfg.twilioFromNumber
   ) {
     try {
-      const auth = Buffer.from(
-        `${cfg.twilioAccountSid}:${cfg.twilioAuthToken}`,
-      ).toString("base64");
+      const auth = Buffer.from(`${cfg.twilioAccountSid}:${cfg.twilioAuthToken}`).toString("base64");
       await axios.post(
         `https://api.twilio.com/2010-04-01/Accounts/${cfg.twilioAccountSid}/Messages.json`,
         new URLSearchParams({
@@ -145,15 +174,10 @@ export function renderWithdrawalStatusTemplate(
   return `Your ACBU withdrawal of ${amount} ${currency} has been ${status}.`;
 }
 
-export function renderInvestmentWithdrawalReadyTemplate(
-  amountAcbu: number,
-): string {
+export function renderInvestmentWithdrawalReadyTemplate(amountAcbu: number): string {
   return `Your investment withdrawal of ${amountAcbu} ACBU is now available. You can complete the transfer or burn from your wallet.`;
 }
 
-export function renderReserveAlertTemplate(
-  health: string,
-  ratio: number,
-): string {
+export function renderReserveAlertTemplate(health: string, ratio: number): string {
   return `ACBU reserve alert: health=${health}, overcollateralization ratio=${ratio.toFixed(2)}%.`;
 }

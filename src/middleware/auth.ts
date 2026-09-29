@@ -1,26 +1,16 @@
 import { Request, Response, NextFunction } from "express";
+import jwt from "jsonwebtoken";
 import { prisma } from "../config/database";
-import bcrypt from "bcryptjs";
+import bcrypt from "bcrypt";
 import { AppError } from "./errorHandler";
 import { logger } from "../config/logger";
-import jwt from "jsonwebtoken";
+import { EXPECTED_JWT_TYP } from "./authMiddleware";
+import { requireAdminApiKey } from "./adminAuth";
+import { PermissionScopeEnum, PermissionScope } from "../types/permissions";
 
 export type Audience = "retail" | "business" | "government";
 export type UserTier = "free" | "verified" | "sme" | "enterprise";
 export type ApiKeyType = "USER_KEY" | "ADMIN_KEY" | "BREAK_GLASS_KEY";
-export type PermissionScope =
-  | "p2p:read"
-  | "p2p:write"
-  | "p2p:admin"
-  | "sme:read"
-  | "sme:write"
-  | "sme:admin"
-  | "gateway:read"
-  | "gateway:write"
-  | "gateway:admin"
-  | "enterprise:read"
-  | "enterprise:write"
-  | "enterprise:admin";
 const API_KEY_PREFIX = "acbu";
 const API_KEY_LOOKUP_LENGTH = 12;
 const API_KEY_SECRET_LENGTH = 64;
@@ -38,9 +28,10 @@ export interface AuthRequest extends Request {
     createdByUserId: string | null;
     emergencyReason: string | null;
     emergencyExpiresAt: Date | null;
-    permissions: string[];
+    permissions: PermissionScope[];
     rateLimit: number;
   };
+  adminId?: string;
   /** Set by audience-specific routes (e.g. /retail, /business, /government) for limits and behaviour. */
   audience?: Audience;
   /** Optional user tier populated by upstream middleware/services for authorization checks. */
@@ -52,23 +43,31 @@ export interface AuthRequest extends Request {
  * @param permissions - Raw permissions from database (Json type)
  * @returns Array of validated permission strings, or empty array if invalid
  */
-function validatePermissions(permissions: unknown): string[] {
-  if (!permissions) {
+function validatePermissions(permissions: unknown): PermissionScope[] {
+  if (!Array.isArray(permissions)) {
+    if (permissions != null) {
+      logger.warn("Invalid permissions in API key record (not an array)", {
+        raw: permissions,
+      });
+    }
     return [];
   }
-
-  if (Array.isArray(permissions)) {
-    return permissions.every((p) => typeof p === "string")
-      ? (permissions as string[])
-      : [];
+  const valid: PermissionScope[] = [];
+  const invalid: unknown[] = [];
+  for (const p of permissions) {
+    const r = PermissionScopeEnum.safeParse(p);
+    if (r.success) valid.push(r.data);
+    else invalid.push(p);
   }
-
-  return [];
+  if (invalid.length > 0) {
+    logger.warn("Dropped invalid permission scopes from API key record", {
+      invalid,
+    });
+  }
+  return valid;
 }
 
-function parseApiKey(
-  rawApiKey: string,
-): { lookupKey: string; secret: string } | null {
+function parseApiKey(rawApiKey: string): { lookupKey: string; secret: string } | null {
   const match = rawApiKey.trim().match(API_KEY_FORMAT);
   if (!match) {
     return null;
@@ -89,16 +88,19 @@ function rejectIfJwtToken(token: string): void {
   const parts = token.split(".");
   if (parts.length === 3) {
     try {
-      // Decode without verification to check claims
-      const decoded = jwt.decode(token) as Record<string, unknown> | null;
-      if (decoded) {
+      const decodedComplete = jwt.decode(token, { complete: true });
+      if (decodedComplete && typeof decodedComplete !== "string") {
+        const typ = decodedComplete.header?.typ;
+        if (!typ || typ.trim().toUpperCase() !== EXPECTED_JWT_TYP) {
+          logger.warn("Non-JWT typ token rejected for API access", { typ });
+          throw new AppError("Invalid credentials format", 401);
+        }
+
+        const decoded = decodedComplete.payload as Record<string, unknown>;
         // Check if this is a challenge token (has 2fa_challenge audience)
         if (decoded.aud === "2fa_challenge" && decoded.iss === "acbu/auth") {
           logger.error("Attempted to use 2FA challenge token for API access");
-          throw new AppError(
-            "Challenge tokens cannot be used for API access",
-            401,
-          );
+          throw new AppError("Challenge tokens cannot be used for API access", 401);
         }
         // Reject any JWT-like token that isn't a standard API key
         logger.warn("Non-API-key JWT token rejected for API access");
@@ -120,9 +122,7 @@ export const validateApiKey = async (
   next: NextFunction,
 ): Promise<void> => {
   try {
-    const apiKey =
-      req.headers["x-api-key"] ||
-      req.headers["authorization"]?.replace("Bearer ", "");
+    const apiKey = req.headers["x-api-key"] || req.headers["authorization"]?.replace("Bearer ", "");
 
     if (!apiKey || typeof apiKey !== "string") {
       throw new AppError("API key is required", 401);
@@ -163,11 +163,26 @@ export const validateApiKey = async (
       throw new AppError("Invalid API key", 401);
     }
 
+    // Reject API keys whose associated user is disabled or deleted
+    if (apiKeyRecord.userId && apiKeyRecord.user) {
+      if (apiKeyRecord.user.deletedAt !== null) {
+        logger.warn("API key validation rejected: user account deleted", {
+          userId: apiKeyRecord.userId,
+          apiKeyId: apiKeyRecord.id,
+        });
+        throw new AppError("Invalid API key", 401);
+      }
+      if ((apiKeyRecord.user as any).isDisabled === true) {
+        logger.warn("API key validation rejected: user account disabled", {
+          userId: apiKeyRecord.userId,
+          apiKeyId: apiKeyRecord.id,
+        });
+        throw new AppError("Invalid API key", 401);
+      }
+    }
+
     // Single bcrypt verification.
-    const isValid = await bcrypt.compare(
-      parsedApiKey.secret,
-      apiKeyRecord.keyHash,
-    );
+    const isValid = await bcrypt.compare(parsedApiKey.secret, apiKeyRecord.keyHash);
     if (!isValid) {
       throw new AppError("Invalid API key", 401);
     }
@@ -178,9 +193,7 @@ export const validateApiKey = async (
         where: { id: apiKeyRecord.id },
         data: { lastUsedAt: new Date() },
       })
-      .catch((e: any) =>
-        logger.error("Failed to update API key lastUsedAt", { e }),
-      );
+      .catch((e: any) => logger.error("Failed to update API key lastUsedAt", { e }));
 
     req.apiKey = {
       id: apiKeyRecord.id,
@@ -204,6 +217,47 @@ export const validateApiKey = async (
   }
 };
 
+export const ADMIN_KEY_TYPES: ApiKeyType[] = ["ADMIN_KEY", "BREAK_GLASS_KEY"];
+
+/**
+ * Middleware to validate admin API key
+ * Requires a valid API key with ADMIN_KEY or BREAK_GLASS_KEY type.
+ * Sets req.adminId for downstream route handlers / audit trails.
+ */
+export const validateAdminKey = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    if (!req.apiKey) {
+      await new Promise<void>((resolve, reject) => {
+        validateApiKey(req, res, (err?: unknown) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve();
+          }
+        });
+      });
+    }
+
+    if (!req.apiKey) {
+      throw new AppError("API key is required", 401);
+    }
+
+    if (!ADMIN_KEY_TYPES.includes(req.apiKey.keyType)) {
+      throw new AppError("Admin key required for this operation", 403);
+    }
+
+    req.adminId = req.apiKey.userId ?? req.apiKey.createdByUserId ?? req.apiKey.id;
+
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
 /**
  * Hash API key secret for storage
  */
@@ -216,7 +270,7 @@ export async function hashApiKey(secret: string): Promise<string> {
  */
 export async function generateApiKey(
   userId?: string,
-  permissions: string[] = [],
+  permissions: PermissionScope[] = [],
   options?: {
     organizationId?: string | null;
     keyType?: ApiKeyType;

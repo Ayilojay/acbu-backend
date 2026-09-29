@@ -4,37 +4,32 @@
  */
 import { Response, NextFunction } from "express";
 import { z } from "zod";
+import crypto from "crypto";
 import { prisma } from "../config/database";
 import { AuthRequest } from "../middleware/auth";
 import { Decimal } from "@prisma/client/runtime/library";
 import { enqueueXlmToAcbu } from "../jobs/xlmToAcbuJob";
+import { Prisma } from "@prisma/client";
 import { AppError } from "../middleware/errorHandler";
 import { isValidStellarAddress } from "../utils/stellar";
 import { assertUserWalletAddress } from "../services/wallet/walletService";
+import { logFinancialEvent } from "../config/logger";
+import { extractIdempotencyKey } from "../utils/idempotency";
 
 export const bodySchema = z.object({
   stellar_address: z
     .string()
     .length(56)
     .regex(/^G/)
-    .refine(
-      (s) => isValidStellarAddress(s),
-      "Invalid Stellar address (bad checksum)",
-    ),
+    .refine((s) => isValidStellarAddress(s), "Invalid Stellar address (bad checksum)"),
   xlm_amount: z
     .string()
     .min(1)
-    .refine(
-      (s) => !Number.isNaN(Number(s)) && Number(s) > 0,
-      "must be positive",
-    ),
+    .refine((s) => !Number.isNaN(Number(s)) && Number(s) > 0, "must be positive"),
   usdc_amount: z
     .string()
     .min(1)
-    .refine(
-      (s) => !Number.isNaN(Number(s)) && Number(s) >= 0,
-      "must be non-negative",
-    )
+    .refine((s) => !Number.isNaN(Number(s)) && Number(s) >= 0, "must be non-negative")
     .optional(),
 });
 
@@ -57,25 +52,61 @@ export async function registerOnRampSwap(
     }
 
     const { stellar_address, xlm_amount, usdc_amount } = parsed.data;
-    const userWalletAddress = await assertUserWalletAddress(
-      userId,
-      stellar_address,
-    );
+    const userWalletAddress = await assertUserWalletAddress(userId, stellar_address);
+
+    const idempotencyKey = extractIdempotencyKey(req);
+    if (idempotencyKey) {
+      const existingSwap = await prisma.onRampSwap.findFirst({
+        where: { idempotencyKey, userId },
+      });
+      if (existingSwap) {
+        res.status(202).json({
+          on_ramp_swap_id: existingSwap.id,
+          status: existingSwap.status,
+          message:
+            "XLM→ACBU job queued. ACBU will be minted to your wallet when processing completes.",
+        });
+        return;
+      }
+    }
+
     const xlmNum = Number(xlm_amount);
-    const swap = await prisma.onRampSwap.create({
-      data: {
-        userId,
-        stellarAddress: userWalletAddress,
-        source: "xlm_deposit",
-        xlmAmount: new Decimal(xlmNum),
-        usdcAmount:
-          usdc_amount != null ? new Decimal(Number(usdc_amount)) : null,
-        status: "pending_convert",
-      },
-    });
+    let swap;
+    try {
+      swap = await prisma.onRampSwap.create({
+        data: {
+          userId,
+          stellarAddress: userWalletAddress,
+          source: "xlm_deposit",
+          xlmAmount: new Decimal(xlmNum),
+          usdcAmount: usdc_amount != null ? new Decimal(Number(usdc_amount)) : null,
+          status: "pending_convert",
+          idempotencyKey,
+        },
+      });
+    } catch (createError) {
+      if (
+        idempotencyKey &&
+        createError instanceof Prisma.PrismaClientKnownRequestError &&
+        createError.code === "P2002"
+      ) {
+        const existingSwap = await prisma.onRampSwap.findFirst({
+          where: { idempotencyKey, userId },
+        });
+        if (existingSwap) {
+          res.status(202).json({
+            on_ramp_swap_id: existingSwap.id,
+            status: existingSwap.status,
+            message:
+              "XLM→ACBU job queued. ACBU will be minted to your wallet when processing completes.",
+          });
+          return;
+        }
+      }
+      throw createError;
+    }
     const correlationId =
-      (req.headers["x-request-id"] as string | undefined) ??
-      crypto.randomUUID();
+      (req.headers["x-request-id"] as string | undefined) ?? crypto.randomUUID();
     logFinancialEvent({
       event: "onramp.registered",
       status: "pending",
@@ -87,7 +118,8 @@ export async function registerOnRampSwap(
       currency: "XLM",
       correlationId,
       timestamp: new Date().toISOString(),
-      environment: (process.env.NODE_ENV ?? "development") as "production" | "staging" | "development",
+      environment: (process.env.NODE_ENV ?? "development") as
+        "production" | "staging" | "development",
     });
     await enqueueXlmToAcbu({
       onRampSwapId: swap.id,
@@ -99,8 +131,7 @@ export async function registerOnRampSwap(
     res.status(202).json({
       on_ramp_swap_id: swap.id,
       status: "pending_convert",
-      message:
-        "XLM→ACBU job queued. ACBU will be minted to your wallet when processing completes.",
+      message: "XLM→ACBU job queued. ACBU will be minted to your wallet when processing completes.",
     });
   } catch (error) {
     next(error);

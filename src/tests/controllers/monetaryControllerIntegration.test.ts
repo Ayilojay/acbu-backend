@@ -1,5 +1,10 @@
 import request from "supertest";
 import Decimal from "decimal.js";
+import {
+  contractNumberToDecimal,
+  decimalToContractNumber,
+  parseMonetaryString,
+} from "../../utils/decimalUtils";
 import { prisma } from "../../config/database";
 import app from "../../index";
 
@@ -22,7 +27,7 @@ describe("Monetary Controller Integration Tests", () => {
 
       expect(response.status).toBe(202);
       expect(response.body.on_ramp_swap_id).toBeDefined();
-      
+
       // Verify the stored amount preserves precision
       const swap = await prisma.onRampSwap.findUnique({
         where: { id: response.body.on_ramp_swap_id },
@@ -40,7 +45,7 @@ describe("Monetary Controller Integration Tests", () => {
         .set("Authorization", "Bearer test-api-key");
 
       expect(response.status).toBe(202);
-      
+
       const swap = await prisma.onRampSwap.findUnique({
         where: { id: response.body.on_ramp_swap_id },
       });
@@ -85,11 +90,52 @@ describe("Monetary Controller Integration Tests", () => {
 
       expect(response.status).toBe(202);
       expect(response.body.amount).toBe("999999999.9999999");
-      
+
       const tx = await prisma.transaction.findUnique({
         where: { id: response.body.transaction_id },
       });
       expect(tx?.localAmount?.toString()).toBe("999999999.9999999");
+    });
+
+    it("should reject duplicate fintech_tx_id values in basket deposit mint flow", async () => {
+      const payload = {
+        currency: "NGN",
+        amount: "1000",
+        wallet_address: "GABCDEFGHIJKLMNOPQRSTUVWXYZ123456789",
+        fintech_tx_id: "fintech-12345",
+      };
+
+      const firstResponse = await request(app)
+        .post("/v1/mint/deposit")
+        .send(payload)
+        .set("Authorization", "Bearer test-api-key");
+
+      expect(firstResponse.status).toBe(202);
+      expect(firstResponse.body.transaction_id).toBeDefined();
+
+      const secondResponse = await request(app)
+        .post("/v1/mint/deposit")
+        .send(payload)
+        .set("Authorization", "Bearer test-api-key");
+
+      expect(secondResponse.status).toBe(409);
+      expect(secondResponse.body.error?.code).toBe("DUPLICATE_FINTECH_TX_ID");
+      expect(secondResponse.body.error?.message).toContain("Duplicate fintech_tx_id detected");
+    });
+
+    it("should reject invalid fintech_tx_id values in basket deposit mint flow", async () => {
+      const response = await request(app)
+        .post("/v1/mint/deposit")
+        .send({
+          currency: "NGN",
+          amount: "1000",
+          wallet_address: "GABCDEFGHIJKLMNOPQRSTUVWXYZ123456789",
+          fintech_tx_id: "invalid tx id",
+        })
+        .set("Authorization", "Bearer test-api-key");
+
+      expect(response.status).toBe(400);
+      expect(response.body.error?.message).toContain("fintech_tx_id must not contain whitespace");
     });
   });
 
@@ -111,7 +157,7 @@ describe("Monetary Controller Integration Tests", () => {
 
       expect(response.status).toBe(200);
       expect(response.body.acbu_amount).toBe("987654321.1234567");
-      
+
       const tx = await prisma.transaction.findUnique({
         where: { id: response.body.transaction_id },
       });
@@ -135,7 +181,7 @@ describe("Monetary Controller Integration Tests", () => {
 
       expect(response.status).toBe(200);
       expect(response.body.fee).toBeDefined();
-      
+
       // Fee should be calculated with Decimal precision
       const tx = await prisma.transaction.findUnique({
         where: { id: response.body.transaction_id },
@@ -165,7 +211,7 @@ describe("Monetary Controller Integration Tests", () => {
     it("should handle ACBU burn at fee calculation boundaries", async () => {
       // Test amount that would cause precision issues with Number()
       const boundaryAmount = "0.00333333"; // 0.00333333 * 50 bps = 0.0000000166665
-      
+
       const response = await request(app)
         .post("/v1/burn/acbu")
         .send({
@@ -181,11 +227,11 @@ describe("Monetary Controller Integration Tests", () => {
         .set("Authorization", "Bearer test-api-key");
 
       expect(response.status).toBe(200);
-      
+
       const tx = await prisma.transaction.findUnique({
         where: { id: response.body.transaction_id },
       });
-      
+
       // Verify fee is calculated precisely
       const expectedFee = new Decimal(boundaryAmount).mul(50).div(10000);
       expect(tx?.fee?.toString()).toBe(expectedFee.toString());
@@ -230,11 +276,11 @@ describe("Monetary Controller Integration Tests", () => {
         .set("Authorization", "Bearer test-api-key");
 
       expect(response.status).toBe(200);
-      
+
       const tx = await prisma.transaction.findUnique({
         where: { id: response.body.transaction_id },
       });
-      
+
       // Verify fee doesn't overflow and maintains precision
       expect(tx?.fee?.toString()).toMatch(/^\d+\.\d+$/);
     });
@@ -244,22 +290,17 @@ describe("Monetary Controller Integration Tests", () => {
     it("should convert amounts to contract format with explicit rounding", async () => {
       // This test would require mocking the contract service
       // For now, we test the internal conversion logic
-      const { decimalToContractNumber } = require("../../utils/decimalUtils");
-      const { parseMonetaryString } = require("../../utils/decimalUtils");
-      
       const amount = parseMonetaryString("123.4567891");
       const contractNumber = decimalToContractNumber(amount);
-      
+
       // Should round down, not up
       expect(contractNumber).toBe(1234567891);
     });
 
     it("should handle contract number conversion back to Decimal", async () => {
-      const { contractNumberToDecimal } = require("../../utils/decimalUtils");
-      
       const contractNumber = 1234567891;
       const decimal = contractNumberToDecimal(contractNumber);
-      
+
       expect(decimal.toString()).toBe("123.4567891");
     });
   });

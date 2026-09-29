@@ -38,8 +38,7 @@ export async function postSalaryDisburse(
     const body = postSalaryDisburseSchema.parse(req.body);
     const result = await salaryService.createSalaryBatch({
       userId,
-      organizationId:
-        body.organization_id || req.apiKey?.organizationId || undefined,
+      organizationId: body.organization_id || req.apiKey?.organizationId || undefined,
       totalAmount: body.total_amount,
       currency: body.currency,
       idempotencyKey: body.idempotency_key,
@@ -50,18 +49,17 @@ export async function postSalaryDisburse(
       })),
     });
 
-    res.status(202).json({
+    res.status(201).json({
       batch_id: result.batchId,
       status: result.status,
-      message: "Salary batch accepted and is being processed.",
+      message: "Salary batch created and is being processed.",
     });
   } catch (e) {
     if (e instanceof z.ZodError) {
-      throw new AppError("Validation error", 400, "VALIDATION_ERROR", e.flatten());
+      return next(new AppError("Validation error", 400, "VALIDATION_ERROR", e.flatten()));
     }
     next(e);
   }
-
 }
 
 /**
@@ -92,7 +90,7 @@ export async function getSalaryBatches(
     });
 
     res.status(200).json({
-      batches: batches.map((b: any) => ({
+      batches: batches.map((b: (typeof batches)[number]) => ({
         batch_id: b.id,
         status: b.status,
         total_amount: b.totalAmount.toString(),
@@ -111,9 +109,7 @@ export const postSalaryScheduleSchema = z.object({
   name: z.string().min(1, "Name is required"),
   cron: z.string().min(1, "Cron expression is required"),
   currency: z.string().default("ACBU"),
-  amount_config: z
-    .array(salaryItemSchema)
-    .min(1, "At least one item is required"),
+  amount_config: z.array(salaryItemSchema).min(1, "At least one item is required"),
 });
 
 /**
@@ -134,8 +130,7 @@ export async function postSalarySchedule(
     const body = postSalaryScheduleSchema.parse(req.body);
     const schedule = await salaryService.createSalarySchedule({
       userId,
-      organizationId:
-        body.organization_id || req.apiKey?.organizationId || undefined,
+      organizationId: body.organization_id || req.apiKey?.organizationId || undefined,
       name: body.name,
       cron: body.cron,
       currency: body.currency,
@@ -149,11 +144,10 @@ export async function postSalarySchedule(
     });
   } catch (e) {
     if (e instanceof z.ZodError) {
-      throw new AppError("Validation error", 400, "VALIDATION_ERROR", e.flatten());
+      return next(new AppError("Validation error", 400, "VALIDATION_ERROR", e.flatten()));
     }
     next(e);
   }
-
 }
 
 /**
@@ -175,7 +169,7 @@ export async function getSalarySchedules(
     });
 
     res.status(200).json({
-      schedules: schedules.map((s: any) => ({
+      schedules: schedules.map((s: (typeof schedules)[number]) => ({
         schedule_id: s.id,
         name: s.name,
         cron: s.cron,

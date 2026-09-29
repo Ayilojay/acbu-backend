@@ -345,7 +345,7 @@ describe("bulk transfer service", () => {
 
   it("handles a duplicate race condition gracefully", async () => {
     let calls = 0;
-    mockPrisma.transaction.findUnique.mockImplementation(async ({ where }: any) => {
+    mockPrisma.transaction.findUnique.mockImplementation(async (_args: any) => {
       calls += 1;
       if (calls === 1) return null;
       return { id: "tx-race", status: "completed" };

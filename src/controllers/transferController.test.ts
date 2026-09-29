@@ -1,8 +1,4 @@
-import {
-  postTransfers,
-  getTransfers,
-  getTransferById,
-} from "./transferController";
+import { postTransfers, getTransfers, getTransferById } from "./transferController";
 import { prisma } from "../config/database";
 import type { AuthRequest } from "../middleware/auth";
 import type { Response, NextFunction } from "express";
@@ -60,11 +56,7 @@ describe("transferController", () => {
 
     it("returns 401 when apiKey is absent entirely", async () => {
       const next = makeNext();
-      await postTransfers(
-        { body: {} } as unknown as AuthRequest,
-        makeRes(),
-        next,
-      );
+      await postTransfers({ body: {} } as unknown as AuthRequest, makeRes(), next);
       expect((next as jest.Mock).mock.calls[0][0]).toMatchObject({
         statusCode: 401,
       });
@@ -136,6 +128,32 @@ describe("transferController", () => {
       });
     });
 
+    it("passes the Idempotency-Key header into transfer creation", async () => {
+      (createTransfer as jest.Mock).mockResolvedValue({
+        transactionId: "tx-2",
+        status: "completed",
+      });
+      const res = makeRes();
+      await postTransfers(
+        {
+          body: { to: "@bob", amount_acbu: "10.5" },
+          apiKey: { userId: "u1" },
+          get: jest.fn().mockReturnValue("idem-transfer"),
+        } as unknown as AuthRequest,
+        res,
+        makeNext(),
+      );
+      expect(createTransfer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          senderUserId: "u1",
+          to: "@bob",
+          amountAcbu: "10.5",
+          idempotencyKey: "idem-transfer",
+        }),
+        expect.any(Object),
+      );
+    });
+
     it("returns 404 when recipient is not found", async () => {
       (createTransfer as jest.Mock).mockRejectedValue(
         new Error("Recipient not found or not available"),
@@ -155,9 +173,7 @@ describe("transferController", () => {
     });
 
     it("returns 404 when sender user record is missing", async () => {
-      (createTransfer as jest.Mock).mockRejectedValue(
-        new Error("Sender user not found"),
-      );
+      (createTransfer as jest.Mock).mockRejectedValue(new Error("Sender user not found"));
       const next = makeNext();
       await postTransfers(
         {
@@ -173,9 +189,7 @@ describe("transferController", () => {
     });
 
     it("returns 400 on self-transfer attempt", async () => {
-      (createTransfer as jest.Mock).mockRejectedValue(
-        new Error("Cannot transfer to yourself"),
-      );
+      (createTransfer as jest.Mock).mockRejectedValue(new Error("Cannot transfer to yourself"));
       const next = makeNext();
       await postTransfers(
         {

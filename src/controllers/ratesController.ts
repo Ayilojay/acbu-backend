@@ -4,19 +4,19 @@
  * GET /v1/rates/basket - Local amounts per 1 ACBU from basket weights + oracle consensus.
  */
 import { Request, Response, NextFunction } from "express";
-import { prisma } from "../config/database";
+import { AcbuRate } from "@prisma/client";
 import { basketService } from "../services/basket";
+import { getLatestAcbuRate } from "../services/rates/acbuRateCache";
 import { computeSyntheticBasketOneAcbuForBasket } from "../services/oracle/syntheticBasket";
 
-export async function getRates(
-  _req: Request,
-  res: Response,
-  next: NextFunction,
-): Promise<void> {
+export async function getRates(_req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const latest = await prisma.acbuRate.findFirst({
-      orderBy: { timestamp: "desc" },
-    });
+    let latest: AcbuRate | null = null;
+    try {
+      latest = await getLatestAcbuRate();
+    } catch {
+      // No rates yet
+    }
     if (!latest) {
       res.status(200).json({
         acbu_usd: null,
@@ -64,9 +64,12 @@ export async function getRatesQuote(
   try {
     const amount = Math.max(0, Number(req.query.amount) || 0);
 
-    const latest = await prisma.acbuRate.findFirst({
-      orderBy: { timestamp: "desc" },
-    });
+    let latest: AcbuRate | null = null;
+    try {
+      latest = await getLatestAcbuRate();
+    } catch {
+      // No rates yet
+    }
     if (!latest) {
       res.status(200).json({
         amount_acbu: amount,

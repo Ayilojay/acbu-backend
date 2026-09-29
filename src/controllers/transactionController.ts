@@ -5,6 +5,8 @@ import { Response, NextFunction } from "express";
 import { z } from "zod";
 import { prisma } from "../config/database";
 import { AuthRequest } from "../middleware/auth";
+import { AppError } from "../middleware/errorHandler";
+import { encodeCursor, decodeCursor } from "../middleware/pagination";
 
 export const listTransactionsQuerySchema = z.object({
   limit: z
@@ -31,10 +33,18 @@ export async function listMyTransactions(
       throw new AppError("User-scoped API key required", 401, "UNAUTHORIZED");
     }
 
+    const query = listTransactionsQuerySchema.safeParse(req.query);
     if (!query.success) {
-      throw new AppError("Invalid query parameters", 400, "VALIDATION_ERROR", query.error.flatten());
+      throw new AppError(
+        "Invalid query parameters",
+        400,
+        "VALIDATION_ERROR",
+        query.error.flatten(),
+      );
     }
     const { limit, cursor } = query.data;
+    // Decode the opaque, scope-bound cursor; rejects forged/cross-user cursors (#405).
+    const cursorId = decodeCursor(cursor, userId);
 
     const list = await prisma.transaction.findMany({
       where: {
@@ -43,7 +53,7 @@ export async function listMyTransactions(
       },
       orderBy: { createdAt: "desc" },
       take: limit + 1,
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
       select: {
         id: true,
         type: true,
@@ -64,7 +74,7 @@ export async function listMyTransactions(
 
     const hasMore = list.length > limit;
     const page = hasMore ? list.slice(0, limit) : list;
-    const nextCursor = hasMore ? page[page.length - 1].id : null;
+    const nextCursor = hasMore ? encodeCursor(page[page.length - 1].id, userId) : null;
 
     const items = page.map((t: (typeof page)[number]) => ({
       transaction_id: t.id,

@@ -4,7 +4,7 @@
 import { Keypair } from "@stellar/stellar-sdk";
 import { prisma } from "../../config/database";
 import { logger } from "../../config/logger";
-import { assertValidStellarAddress } from "../../utils/stellar";
+import { assertValidStellarAddress, isValidStellarAddress } from "../../utils/stellar";
 import { AppError } from "../../middleware/errorHandler";
 
 export interface EnsureWalletResult {
@@ -25,6 +25,15 @@ export async function assertUserWalletAddress(
     throw new AppError("User wallet address not set", 400);
   }
 
+  // Validate stored address format (defense in depth)
+  if (!isValidStellarAddress(user.stellarAddress)) {
+    logger.error("Invalid stellar address format in database", {
+      userId,
+      stellarAddress: user.stellarAddress,
+    });
+    throw new AppError("Invalid wallet address format", 500);
+  }
+
   if (user.stellarAddress !== providedAddress) {
     throw new AppError("Wallet address does not match user", 403);
   }
@@ -36,9 +45,7 @@ export async function assertUserWalletAddress(
  * If user has no wallet (encryptedStellarSecret is null), create keypair, set stellarAddress, return passphrase.
  * Caller must not persist passphrase; user copies it, then calls confirm with encryption.
  */
-export async function ensureWalletForUser(
-  userId: string,
-): Promise<EnsureWalletResult> {
+export async function ensureWalletForUser(userId: string): Promise<EnsureWalletResult> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: { id: true, stellarAddress: true, encryptedStellarSecret: true },
@@ -54,10 +61,60 @@ export async function ensureWalletForUser(
   // Guard: ensure generated address is valid before persisting
   assertValidStellarAddress(publicKey);
 
+  // Additional guard: reject any address that looks like a placeholder
+  if (isPlaceholderAddress(publicKey)) {
+    throw new Error("Generated address appears to be a placeholder");
+  }
+
   await prisma.user.update({
     where: { id: userId },
-    data: { stellarAddress: publicKey },
+    data: { stellarAddress: publicKey, walletVersion: { increment: 1 } },
   });
   logger.info("Wallet created for user", { userId, stellarAddress: publicKey });
   return { wallet_created: true, passphrase: secretKey };
+}
+
+/**
+ * Check if an address looks like a common placeholder pattern.
+ * This provides defense-in-depth against test/dummy addresses in production.
+ */
+function isPlaceholderAddress(address: string): boolean {
+  if (!address || address.length !== 56) return true;
+
+  // Common placeholder patterns
+  const placeholderPatterns = [
+    /^G[A]{55}$/, // All A's (GAAAA...)
+    /^G[B]{55}$/, // All B's (GBBBB...)
+    /^G[0]{55}$/, // All zeros
+    /^GTEST/, // Starts with GTEST
+    /^GDUMMY/, // Starts with GDUMMY
+    /^GPLACEHOLDER/, // Starts with GPLACEHOLDER
+    /^GXXXXXXXX/, // Starts with GXXXXXXXX
+  ];
+
+  return placeholderPatterns.some((pattern) => pattern.test(address));
+}
+
+/**
+ * Validate and set stellar address for a user (e.g., for imported wallets).
+ * This is the ONLY function that should be used to set stellarAddress externally.
+ */
+export async function setStellarAddressForUser(
+  userId: string,
+  stellarAddress: string,
+): Promise<void> {
+  // Strict validation
+  assertValidStellarAddress(stellarAddress);
+
+  // Reject placeholders
+  if (isPlaceholderAddress(stellarAddress)) {
+    throw new AppError("Invalid stellar address: appears to be a placeholder", 400);
+  }
+
+  await prisma.user.update({
+    where: { id: userId },
+    data: { stellarAddress, walletVersion: { increment: 1 } },
+  });
+
+  logger.info("Stellar address set for user", { userId, stellarAddress });
 }

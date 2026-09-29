@@ -4,7 +4,8 @@
  * Consumes XLM_TO_ACBU queue or polls OnRampSwap table for pending_convert.
  */
 import type { ConsumeMessage } from "amqplib";
-import { connectRabbitMQ, QUEUES } from "../config/rabbitmq";
+import { connectRabbitMQ, QUEUES, assertQueueWithDLQ } from "../config/rabbitmq";
+import { getQueueMaxRetries } from "./queueConfig";
 import { logger, logFinancialEvent } from "../config/logger";
 import { prisma } from "../config/database";
 import { mintFromUsdcInternal } from "../controllers/mintController";
@@ -12,6 +13,7 @@ import { fetchXlmRateUsd } from "../services/oracle/cryptoClient";
 import { randomUUID } from "crypto";
 
 const QUEUE = QUEUES.XLM_TO_ACBU;
+const MAX_RETRIES = getQueueMaxRetries(QUEUE);
 
 export interface XlmToAcbuPayload {
   onRampSwapId: string;
@@ -23,12 +25,14 @@ export interface XlmToAcbuPayload {
 
 export async function startXlmToAcbuConsumer(): Promise<void> {
   const ch = await connectRabbitMQ();
-  await ch.assertQueue(QUEUE, { durable: true });
+  await assertQueueWithDLQ(QUEUE);
   ch.prefetch(1);
   ch.consume(
     QUEUE,
     async (msg: ConsumeMessage | null) => {
       if (!msg) return;
+      const headers = msg.properties.headers ?? {};
+      const retries = typeof headers["x-retries"] === "number" ? headers["x-retries"] : 0;
       try {
         const body = JSON.parse(msg.content.toString()) as XlmToAcbuPayload;
         const correlationId = randomUUID();
@@ -36,7 +40,16 @@ export async function startXlmToAcbuConsumer(): Promise<void> {
         ch.ack(msg);
       } catch (e) {
         logger.error("XLM→ACBU job failed", { error: e });
-        ch.nack(msg, false, true);
+        if (retries >= MAX_RETRIES) {
+          logger.error("XLM→ACBU job failed permanently, sending to DLQ", { retries });
+          ch.nack(msg, false, false);
+          return;
+        }
+        ch.sendToQueue(QUEUE, msg.content, {
+          persistent: true,
+          headers: { ...headers, "x-retries": retries + 1 },
+        });
+        ch.ack(msg);
       }
     },
     { noAck: false },
@@ -51,8 +64,7 @@ export async function processXlmToAcbu(
   payload: XlmToAcbuPayload,
   correlationId: string = randomUUID(),
 ): Promise<void> {
-  const { onRampSwapId, userId, stellarAddress, xlmAmount, usdcEquivalent } =
-    payload;
+  const { onRampSwapId, userId, stellarAddress, xlmAmount, usdcEquivalent } = payload;
   const xlmNum = Number(xlmAmount);
   let usdcAmount = usdcEquivalent ? Number(usdcEquivalent) : 0;
 
@@ -71,10 +83,9 @@ export async function processXlmToAcbu(
     data: { status: "processing" },
   });
   if (claimed.count === 0) {
-    logger.warn(
-      "OnRampSwap not found, not pending, or already claimed by another worker",
-      { onRampSwapId },
-    );
+    logger.warn("OnRampSwap not found, not pending, or already claimed by another worker", {
+      onRampSwapId,
+    });
     return;
   }
 
@@ -143,11 +154,9 @@ export async function processXlmToAcbu(
 /**
  * Enqueue an on-ramp swap for processing (call when user has swapped USDC→XLM).
  */
-export async function enqueueXlmToAcbu(
-  payload: XlmToAcbuPayload,
-): Promise<void> {
+export async function enqueueXlmToAcbu(payload: XlmToAcbuPayload): Promise<void> {
   const ch = await connectRabbitMQ();
-  await ch.assertQueue(QUEUE, { durable: true });
+  await assertQueueWithDLQ(QUEUE);
   ch.sendToQueue(QUEUE, Buffer.from(JSON.stringify(payload)), {
     persistent: true,
   });

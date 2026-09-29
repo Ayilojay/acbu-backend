@@ -1,5 +1,6 @@
 export {
   sendEmail,
+  sendEmailBatch,
   sendSms,
   renderOtpTemplate,
   renderWithdrawalStatusTemplate,

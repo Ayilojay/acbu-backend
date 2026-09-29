@@ -71,6 +71,12 @@ router.post("/withdraw/request", postInvestmentWithdrawRequest);
  *         name: cursor
  *         schema:
  *           type: string
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *           enum: [requested, available, completed, cancelled]
+ *         description: Optional withdrawal status filter
  *     responses:
  *       200:
  *         description: List of withdrawal requests

@@ -1,7 +1,11 @@
-
 import { exportData, deleteAccount } from "../src/controllers/complianceController";
 import { prisma } from "../src/config/database";
 import { AppError } from "../src/middleware/errorHandler";
+import { getAuditExports } from "../src/services/reports/reportService";
+
+jest.mock("../src/services/reports/reportService", () => ({
+  getAuditExports: jest.fn(),
+}));
 
 jest.mock("../src/config/database", () => ({
   prisma: {
@@ -53,14 +57,11 @@ describe("Compliance Controller", () => {
         passcodeHash: "secret-hash",
         encryptedStellarSecret: "secret",
       };
-      (prisma.user.findUnique as jest.Mock).mockResolvedValue(mockUser);
+      (getAuditExports as jest.Mock).mockResolvedValue(mockUser);
 
       await exportData(mockReq as any, mockRes as any, mockNext);
 
-      expect(prisma.user.findUnique).toHaveBeenCalledWith({
-        where: { id: "test-user-id" },
-        include: expect.any(Object),
-      });
+      expect(getAuditExports).toHaveBeenCalledWith("test-user-id");
 
       expect(mockRes.json).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -70,12 +71,12 @@ describe("Compliance Controller", () => {
             email: "test@example.com",
             // sensitive fields omitted
           },
-        })
+        }),
       );
     });
 
     it("should handle missing user", async () => {
-      (prisma.user.findUnique as jest.Mock).mockResolvedValue(null);
+      (getAuditExports as jest.Mock).mockResolvedValue(null);
 
       await exportData(mockReq as any, mockRes as any, mockNext);
 

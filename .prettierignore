@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# Testing
+coverage/
+.nyc_output/
+
+# Prisma generated client
+prisma/generated/
+
+# Heap snapshots
+heapdumps/
+*.heapsnapshot

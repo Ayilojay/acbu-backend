@@ -2,16 +2,18 @@
  * Limits and circuit breakers for deposit/withdrawal.
  * Enforces per-audience daily/monthly caps and reserve-based circuit breakers.
  */
+import { Decimal } from "@prisma/client/runtime/library";
 import { prisma } from "../../config/database";
 import {
   getLimitConfig,
-  CIRCUIT_BREAKER_RESERVE_WEIGHT_THRESHOLD_PCT,
-  CIRCUIT_BREAKER_MIN_RESERVE_RATIO,
+  getCircuitBreakerMinReserveRatio,
+  getCircuitBreakerReserveWeightThresholdPct,
 } from "../../config/limits";
 import { reserveTracker, ReserveTracker } from "../reserve/ReserveTracker";
 // import { basketService } from '../basket';
 import type { Audience } from "../../middleware/auth";
 import { AppError } from "../../middleware/errorHandler";
+import { getStartOfZonedDay, getStartOfZonedMonth } from "../../utils/dateUtils";
 
 function buildActorWhere(userId: string | null, organizationId: string | null) {
   if (userId) {
@@ -38,24 +40,21 @@ function buildActorWhere(userId: string | null, organizationId: string | null) {
  */
 export async function checkDepositLimits(
   audience: Audience,
-  amountUsd: number,
+  amountUsd: Decimal,
   userId: string | null,
   organizationId: string | null,
 ): Promise<void> {
-  const config = getLimitConfig(audience);
-  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const startOfMonth = new Date(
-    new Date().getFullYear(),
-    new Date().getMonth(),
-    1,
-  );
+  const config = await getLimitConfig(audience);
+  const now = new Date();
+  const startOfDay = getStartOfZonedDay(now);
+  const startOfMonth = getStartOfZonedMonth(now);
 
   const whereActor = buildActorWhere(userId, organizationId);
   const mintedDaily = await prisma.transaction.aggregate({
     where: {
       type: "mint",
       status: { in: ["pending", "processing", "completed"] },
-      createdAt: { gte: since24h },
+      createdAt: { gte: startOfDay },
       ...whereActor,
     },
     _sum: { usdcAmount: true },
@@ -72,17 +71,16 @@ export async function checkDepositLimits(
 
   // For basket-currency deposits we may not have usdcAmount; use localAmount converted to USD if needed.
   // Simplified: use amountUsd passed in (caller should pass USD equivalent).
-  const dailyUsd = (mintedDaily._sum.usdcAmount?.toNumber() ?? 0) + amountUsd;
-  const monthlyUsd =
-    (mintedMonthly._sum.usdcAmount?.toNumber() ?? 0) + amountUsd;
+  const dailyUsd = new Decimal(mintedDaily._sum.usdcAmount ?? 0).plus(amountUsd);
+  const monthlyUsd = new Decimal(mintedMonthly._sum.usdcAmount ?? 0).plus(amountUsd);
 
-  if (dailyUsd > config.depositDailyUsd) {
+  if (dailyUsd.greaterThan(config.depositDailyUsd)) {
     throw new AppError(
       `Deposit daily limit exceeded ($${config.depositDailyUsd}). Current 24h: $${dailyUsd.toFixed(2)}.`,
       429,
     );
   }
-  if (monthlyUsd > config.depositMonthlyUsd) {
+  if (monthlyUsd.greaterThan(config.depositMonthlyUsd)) {
     throw new AppError(
       `Deposit monthly limit exceeded ($${config.depositMonthlyUsd}). Current month: $${monthlyUsd.toFixed(2)}.`,
       429,
@@ -97,18 +95,15 @@ export async function checkDepositLimits(
  */
 export async function checkWithdrawalLimits(
   audience: Audience,
-  amountAcbu: number,
+  amountAcbu: Decimal,
   currency: string,
   userId: string | null,
   organizationId: string | null,
 ): Promise<void> {
-  const config = getLimitConfig(audience);
-  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const startOfMonth = new Date(
-    new Date().getFullYear(),
-    new Date().getMonth(),
-    1,
-  );
+  const config = await getLimitConfig(audience);
+  const now = new Date();
+  const startOfDay = getStartOfZonedDay(now);
+  const startOfMonth = getStartOfZonedMonth(now);
 
   const whereActor = buildActorWhere(userId, organizationId);
   const burnedDaily = await prisma.transaction.aggregate({
@@ -116,7 +111,7 @@ export async function checkWithdrawalLimits(
       type: { in: ["burn", "bill_payment"] },
       localCurrency: currency,
       status: { in: ["pending", "processing", "completed"] },
-      createdAt: { gte: since24h },
+      createdAt: { gte: startOfDay },
       ...whereActor,
     },
     _sum: { acbuAmountBurned: true },
@@ -132,18 +127,16 @@ export async function checkWithdrawalLimits(
     _sum: { acbuAmountBurned: true },
   });
 
-  const dailyAcbu =
-    (burnedDaily._sum.acbuAmountBurned?.toNumber() ?? 0) + amountAcbu;
-  const monthlyAcbu =
-    (burnedMonthly._sum.acbuAmountBurned?.toNumber() ?? 0) + amountAcbu;
+  const dailyAcbu = new Decimal(burnedDaily._sum.acbuAmountBurned ?? 0).plus(amountAcbu);
+  const monthlyAcbu = new Decimal(burnedMonthly._sum.acbuAmountBurned ?? 0).plus(amountAcbu);
 
-  if (dailyAcbu > config.withdrawalSingleCurrencyDailyUsd) {
+  if (dailyAcbu.greaterThan(config.withdrawalSingleCurrencyDailyUsd)) {
     throw new AppError(
       `Withdrawal daily limit for ${currency} exceeded ($${config.withdrawalSingleCurrencyDailyUsd} equivalent).`,
       429,
     );
   }
-  if (monthlyAcbu > config.withdrawalSingleCurrencyMonthlyUsd) {
+  if (monthlyAcbu.greaterThan(config.withdrawalSingleCurrencyMonthlyUsd)) {
     throw new AppError(
       `Withdrawal monthly limit for ${currency} exceeded ($${config.withdrawalSingleCurrencyMonthlyUsd} equivalent).`,
       429,
@@ -155,27 +148,21 @@ export async function checkWithdrawalLimits(
  * Circuit breaker: return true if single-currency withdrawals for this currency are paused
  * (reserve below threshold % of target).
  */
-export async function isCurrencyWithdrawalPaused(
-  currency: string,
-): Promise<boolean> {
-  const status = await reserveTracker.getReserveStatus(
-    ReserveTracker.SEGMENT_TRANSACTIONS,
-  );
+export async function isCurrencyWithdrawalPaused(currency: string): Promise<boolean> {
+  const status = await reserveTracker.getReserveStatus(ReserveTracker.SEGMENT_TRANSACTIONS);
   const curr = status.currencies.find((c) => c.currency === currency);
   if (!curr) return false;
   const targetWeight = curr.targetWeight;
   const actualWeight = curr.actualWeight;
   if (targetWeight <= 0) return false;
   const pctOfTarget = (actualWeight / targetWeight) * 100;
-  return pctOfTarget < CIRCUIT_BREAKER_RESERVE_WEIGHT_THRESHOLD_PCT;
+  return pctOfTarget < (await getCircuitBreakerReserveWeightThresholdPct());
 }
 
 /**
  * Circuit breaker: return true if new minting should be paused (reserve ratio below 102%).
  */
 export async function isMintingPaused(): Promise<boolean> {
-  const ratio = await reserveTracker.calculateReserveRatio(
-    ReserveTracker.SEGMENT_TRANSACTIONS,
-  );
-  return ratio < CIRCUIT_BREAKER_MIN_RESERVE_RATIO;
+  const ratio = await reserveTracker.calculateReserveRatio(ReserveTracker.SEGMENT_TRANSACTIONS);
+  return ratio < (await getCircuitBreakerMinReserveRatio());
 }

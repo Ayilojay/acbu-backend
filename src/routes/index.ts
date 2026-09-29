@@ -2,13 +2,13 @@ import { Router } from "express";
 import { config } from "../config/env";
 import { deepHealthCheck } from "../controllers/healthController";
 import { requireAdminApiKey } from "../middleware/adminAuth";
+import { registry } from "../config/promMetrics";
 import reserveRoutes from "./reserveRoutes";
 import recipientRoutes from "./recipientRoutes";
 import transferRoutes from "./transferRoutes";
 import userRoutes from "./userRoutes";
 import recoveryRoutes from "./recoveryRoutes";
 import authRoutes from "./authRoutes";
-import webhookRoutes from "./webhookRoutes";
 import mintRoutes from "./mintRoutes";
 import burnRoutes from "./burnRoutes";
 import ratesRoutes from "./ratesRoutes";
@@ -30,8 +30,12 @@ import investmentRoutes from "./investmentRoutes";
 import fiatRoutes from "./fiatRoutes";
 import configRoutes from "./configRoutes";
 import complianceRoutes from "./complianceRoutes";
+import kycRoutes from "./kycRoutes";
+import weightDriftAuditRoutes from "./weightDriftAuditRoutes";
+import reportRoutes from "./reportRoutes";
+import privacyRoutes from "./privacy";
 
-const router: ReturnType<typeof Router> = Router();
+const router: ReturnType<typeof Router> = Router({ caseSensitive: true });
 
 // Shallow health check — always 200, no dependency probing (used by load balancers)
 router.get("/health", (_req, res) => {
@@ -68,6 +72,13 @@ router.get("/health/deep", requireAdminApiKey, deepHealthCheck);
 // Extended health / metrics (reserve ratio when available; for monitoring dashboards)
 router.get("/health/metrics", requireAdminApiKey, deepHealthCheck);
 
+// #388: Prometheus-compatible metrics endpoint (admin-only).
+// Scrape with: GET /api/v1/metrics  Authorization: Bearer <ADMIN_API_KEY>
+router.get("/metrics", requireAdminApiKey, async (_req, res) => {
+  res.set("Content-Type", registry.contentType);
+  res.end(await registry.metrics());
+});
+
 // API routes
 router.use("/auth", authRoutes);
 router.use("/reserves", reserveRoutes);
@@ -96,7 +107,9 @@ router.use("/investment", investmentRoutes);
 router.use("/fiat", fiatRoutes);
 router.use("/config", configRoutes);
 router.use("/kyc", kycRoutes);
-router.use("/webhooks", webhookRoutes);
+router.use("/reports", reportRoutes);
 router.use("/compliance", complianceRoutes);
+router.use("/privacy", privacyRoutes);
+router.use("/admin/weight-drift-audits", weightDriftAuditRoutes);
 
 export default router;

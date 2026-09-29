@@ -1,9 +1,5 @@
 import { Router, type IRouter } from "express";
-import {
-  postTransfers,
-  getTransfers,
-  getTransferById,
-} from "../controllers/transferController";
+import { postTransfers, getTransfers, getTransferById } from "../controllers/transferController";
 import { validateApiKey } from "../middleware/auth";
 import { apiKeyRateLimiter } from "../middleware/rateLimiter";
 
@@ -38,6 +34,7 @@ import { apiKeyRateLimiter } from "../middleware/rateLimiter";
  *                 type: string
  *                 minLength: 1
  *                 description: Recipient alias (@user, E.164 phone, email) or Stellar address (56 chars)
+ *                 example: "@alice"
  *               amount_acbu:
  *                 type: string
  *                 pattern: '^\d+(\.\d{1,7})?$'

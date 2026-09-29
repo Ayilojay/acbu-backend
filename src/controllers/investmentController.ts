@@ -6,28 +6,22 @@ import { z } from "zod";
 import { prisma } from "../config/database";
 import { AuthRequest } from "../middleware/auth";
 import { Decimal } from "@prisma/client/runtime/library";
-import { InvestmentWithdrawalRequest } from "@prisma/client";
 import { AppError } from "../middleware/errorHandler";
+import { encodeCursor, decodeCursor } from "../middleware/pagination";
 import {
-  isBusinessWithdrawalAllowedDate,
+  INVESTMENT_BUSINESS_ALLOWED_DAYS,
   INVESTMENT_FORCED_REMOVAL_FEE_PERCENT,
 } from "../config/investment";
-import { getRabbitMQChannel } from "../config/rabbitmq";
-import { QUEUES } from "../config/rabbitmq";
+import { getInvestmentWithdrawalTiming } from "../services/investment/withdrawalTimingService";
 
 export const requestSchema = z.object({
   amount_acbu: z
     .string()
     .min(1)
-    .refine(
-      (s) => !Number.isNaN(Number(s)) && Number(s) > 0,
-      "must be positive",
-    ),
+    .refine((s) => !Number.isNaN(Number(s)) && Number(s) > 0, "must be positive"),
   audience: z.enum(["retail", "business"]),
   forced_removal: z.boolean().optional(),
 });
-
-const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 
 /**
  * POST /v1/investment/withdraw/request - Request investment withdrawal. Funds available in 24h; notification when ready.
@@ -49,20 +43,20 @@ export async function postInvestmentWithdrawRequest(
     }
     const { amount_acbu, audience, forced_removal } = parsed.data;
     const amountNum = Number(amount_acbu);
+    const timing = await getInvestmentWithdrawalTiming();
 
     if (audience === "business") {
-      const onAllowedDate = isBusinessWithdrawalAllowedDate();
-      if (!onAllowedDate && !forced_removal) {
+      if (!timing.isBusinessWithdrawalAllowedDate && !forced_removal) {
         throw new AppError(
           "Business investment withdrawals are only allowed on specific dates. Use forced_removal: true to withdraw with 1% fee (funds in 24h).",
           403,
           "INVESTMENT_BUSINESS_CALENDAR",
-          { allowed_days: process.env.INVESTMENT_BUSINESS_ALLOWED_DAYS || "1,15" },
+          { allowed_days: INVESTMENT_BUSINESS_ALLOWED_DAYS.join(",") },
         );
       }
     }
 
-    const availableAt = new Date(Date.now() + TWENTY_FOUR_HOURS_MS);
+    const availableAt = timing.availableAt;
     let feePercent: Decimal | null = null;
     if (audience === "business" && forced_removal) {
       feePercent = new Decimal(INVESTMENT_FORCED_REMOVAL_FEE_PERCENT);
@@ -78,6 +72,7 @@ export async function postInvestmentWithdrawRequest(
         forcedRemoval: audience === "business" && forced_removal === true,
         feePercent,
         availableAt,
+        createdAt: timing.requestedAt,
       },
     });
 
@@ -91,9 +86,7 @@ export async function postInvestmentWithdrawRequest(
         audience === "retail"
           ? "Funds will be available in 24 hours. You will receive a notification when ready."
           : "Funds will be available in 24 hours." +
-            (feePercent
-              ? ` A ${feePercent}% fee applies (forced removal).`
-              : ""),
+            (feePercent ? ` A ${feePercent}% fee applies (forced removal).` : ""),
     });
   } catch (e) {
     next(e);
@@ -102,7 +95,7 @@ export async function postInvestmentWithdrawRequest(
 
 const WITHDRAWAL_STATUSES = ["requested", "available", "completed", "cancelled"] as const;
 
-const getWithdrawRequestsQuerySchema = z.object({
+export const getWithdrawRequestsQuerySchema = z.object({
   limit: z
     .string()
     .optional()
@@ -132,6 +125,10 @@ export async function getInvestmentWithdrawRequests(
       throw new AppError(msg, 400);
     }
     const { limit, cursor, status } = query.data;
+    // Bind the cursor to the caller's scope (user or org) and verify its
+    // signature so it cannot be forged to page into another scope's rows (#405).
+    const cursorScope = userId ?? organizationId ?? "";
+    const cursorId = decodeCursor(cursor, cursorScope);
 
     const where = {
       ...(userId ? { userId } : { organizationId }),
@@ -142,15 +139,16 @@ export async function getInvestmentWithdrawRequests(
       where,
       orderBy: { createdAt: "desc" },
       take: limit + 1,
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
     });
 
     const hasMore = list.length > limit;
     const page = hasMore ? list.slice(0, limit) : list;
-    const nextCursor = hasMore ? page[page.length - 1].id : null;
+    const nextCursor = hasMore ? encodeCursor(page[page.length - 1].id, cursorScope) : null;
+    type WithdrawalRequestRow = (typeof list)[number];
 
     res.status(200).json({
-      requests: page.map((r: InvestmentWithdrawalRequest) => ({
+      requests: page.map((r: WithdrawalRequestRow) => ({
         id: r.id,
         amount_acbu: r.amountAcbu.toString(),
         status: r.status,
@@ -164,29 +162,4 @@ export async function getInvestmentWithdrawRequests(
   } catch (e) {
     next(e);
   }
-}
-
-/**
- * Publish investment_withdrawal_ready to NOTIFICATIONS queue (called by job).
- */
-export async function publishInvestmentWithdrawalReady(
-  userId: string | null,
-  amountAcbu: number,
-  organizationId?: string | null,
-): Promise<void> {
-  const ch = getRabbitMQChannel();
-  await ch.assertQueue(QUEUES.NOTIFICATIONS, { durable: true });
-  ch.sendToQueue(
-    QUEUES.NOTIFICATIONS,
-    Buffer.from(
-      JSON.stringify({
-        type: "investment_withdrawal_ready",
-        userId,
-        organizationId: organizationId ?? null,
-        amountAcbu,
-        timestamp: new Date().toISOString(),
-      }),
-    ),
-    { persistent: true },
-  );
 }

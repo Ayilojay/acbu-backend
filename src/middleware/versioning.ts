@@ -2,16 +2,16 @@ import { Request, Response, NextFunction } from "express";
 import { config } from "../config/env";
 
 // Versions that have been sunset. Map version string → ISO 8601 sunset date.
-const SUNSET_DATES: Record<string, string> = {};
+export const SUNSET_DATES: Record<string, string> = {
+  // Example: "v0": "2024-01-01T00:00:00Z",
+};
 
 // Versions that are deprecated but not yet sunset. Map version string → ISO 8601 deprecation date.
-const DEPRECATION_DATES: Record<string, string> = {};
+export const DEPRECATION_DATES: Record<string, string> = {
+  // Example: "v1": "2025-01-01T00:00:00Z",
+};
 
-export function versioningMiddleware(
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): void {
+export function versioningMiddleware(req: Request, res: Response, next: NextFunction): void {
   const currentVersion = config.apiVersion;
 
   // Always advertise the current API version so clients can track it.
@@ -31,7 +31,16 @@ export function versioningMiddleware(
         "Warning",
         `299 - "API version ${requestedVersion} has been sunset as of ${sunsetDate}. Migrate to ${currentVersion}."`,
       );
-    } else if (deprecationDate) {
+      res.status(410).json({
+        error: "Gone",
+        message: `API version ${requestedVersion} has been sunset as of ${sunsetDate}. Please migrate to ${currentVersion}.`,
+        currentVersion,
+        sunsetDate,
+      });
+      return;
+    }
+
+    if (deprecationDate) {
       res.setHeader("Deprecation", deprecationDate);
       res.setHeader(
         "Warning",

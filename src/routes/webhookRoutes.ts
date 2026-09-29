@@ -5,16 +5,13 @@ import {
   handlePaystackWebhook,
   verifyPaystackSignature,
   handleBillsWebhook,
+  verifyBillsWebhookSignature,
 } from "../controllers/webhookController";
 
 const router: IRouter = Router();
-// Raw body and parsed body are set by middleware in index.ts for /v1/webhooks
-router.post(
-  "/flutterwave",
-  verifyFlutterwaveSignature,
-  handleFlutterwaveWebhook,
-);
+// Content-Type validation is handled in index.ts before raw body parsing
+router.post("/flutterwave", verifyFlutterwaveSignature, handleFlutterwaveWebhook);
 router.post("/paystack", verifyPaystackSignature, handlePaystackWebhook);
-router.post("/bills/:provider", handleBillsWebhook);
+router.post("/bills/:provider", verifyBillsWebhookSignature, handleBillsWebhook);
 
 export default router;

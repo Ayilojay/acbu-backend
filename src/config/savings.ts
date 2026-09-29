@@ -2,6 +2,13 @@
  * Savings: lock calendar (monthly dates when withdrawals are not allowed) and returns parameters.
  * Aligned with SAVINGS_AND_INVESTMENT_POLICY.MD.
  */
+import {
+  addCalendarMonths,
+  getZonedDayOfMonth,
+  getZonedParts,
+  resolveTimeZone,
+  zonedDateTimeToUtc,
+} from "../utils/dateUtils";
 
 /** Day-of-month (1–31) when savings withdrawals are locked. Default: 1 and 15. */
 export const SAVINGS_LOCK_DAYS = (process.env.SAVINGS_LOCK_DAYS || "1,15")
@@ -29,26 +36,25 @@ export const SAVINGS_APY_BY_TERM: Record<number, number> = (() => {
   };
 })();
 
-export function isSavingsLockDate(date: Date = new Date()): boolean {
-  const day = date.getDate();
+export function isSavingsLockDate(date: Date = new Date(), timeZone?: string): boolean {
+  const day = getZonedDayOfMonth(date, timeZone);
   return SAVINGS_LOCK_DAYS.includes(day);
 }
 
 /** Next calendar date when withdrawal is allowed (after today). */
-export function getNextSavingsWithdrawalDate(date: Date = new Date()): Date {
-  const result = new Date(date);
-  result.setHours(0, 0, 0, 0);
-  const day = result.getDate();
+export function getNextSavingsWithdrawalDate(date: Date = new Date(), timeZone?: string): Date {
+  const tz = resolveTimeZone(timeZone);
+  const parts = getZonedParts(date, tz);
   const sorted = [...SAVINGS_LOCK_DAYS].sort((a, b) => a - b);
+
   for (const d of sorted) {
-    if (d > day) {
-      result.setDate(d);
-      return result;
+    if (d > parts.day) {
+      return zonedDateTimeToUtc(parts.year, parts.month, d, 0, 0, 0, tz);
     }
   }
-  result.setMonth(result.getMonth() + 1);
-  result.setDate(sorted[0] ?? 1);
-  return result;
+
+  const nextMonth = addCalendarMonths({ year: parts.year, month: parts.month, day: parts.day }, 1);
+  return zonedDateTimeToUtc(nextMonth.year, nextMonth.month, sorted[0] ?? 1, 0, 0, 0, tz);
 }
 
 export function getApyForTerm(termSeconds: number): number {
@@ -56,10 +62,6 @@ export function getApyForTerm(termSeconds: number): number {
 }
 
 /** Accrued yield = principal * (apy/100) * (daysLocked/365). */
-export function computeAccruedYield(
-  principal: number,
-  apy: number,
-  daysLocked: number,
-): number {
+export function computeAccruedYield(principal: number, apy: number, daysLocked: number): number {
   return (principal * (apy / 100) * daysLocked) / 365;
 }

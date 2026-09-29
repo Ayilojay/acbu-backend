@@ -2,32 +2,44 @@
  * Transfer service: resolve alias to stellarAddress, create Transaction, optionally submit Stellar payment.
  * Uses direct wallets (G...). When getSenderSigningKey is provided, signs and submits; otherwise leaves pending.
  */
-import {
-  Operation,
-  Asset,
-  Keypair,
-  TransactionBuilder,
-} from "@stellar/stellar-sdk";
-import { Decimal } from "@prisma/client/runtime/library";
+import { Operation, Asset, Keypair, TransactionBuilder } from "@stellar/stellar-sdk";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../../config/database";
 import { stellarClient } from "../stellar/client";
 import { getBaseFee } from "../stellar/feeManager";
-import { resolveRecipientToStellarAddress } from "../recipient/recipientResolver";
+import { normalizeRecipientQuery, resolveRecipient } from "../recipient/recipientResolver";
+import { getAcbuAsset } from "../../config/acbuAsset";
+import crypto from "crypto";
+import { reserveWalletVersion, fetchWalletBalance } from "../wallet/walletStateService";
 
-import { logger } from "../../config/logger";
-import type {
-  CreateTransferParams,
-  CreateTransferOptions,
-  CreateTransferResult,
-} from "./types";
+import { logger, logFinancialEvent } from "../../config/logger";
+import type { CreateTransferParams, CreateTransferOptions, CreateTransferResult } from "./types";
 
-/** ACBU asset: use native when issuer not configured. Set STELLAR_ACBU_ASSET_ISSUER for custom asset. */
-function getAcbuAsset(): Asset {
-  const issuer = process.env.STELLAR_ACBU_ASSET_ISSUER;
-  if (issuer) {
-    return new Asset("ACBU", issuer);
+/** Parse a non-negative amount string into 7-decimal smallest units to avoid float drift. */
+function amountToSmallestUnit(amount: string): number {
+  const [wholePart, fracPart = ""] = amount.split(".");
+  return parseInt(wholePart, 10) * 10000000 + parseInt(fracPart.slice(0, 7).padEnd(7, "0"), 10);
+}
+
+/**
+ * Resolve an alias (@user, E.164, email) or raw G... to a Stellar address.
+ * Raw addresses pass through shape-validated by normalizeRecipientQuery; aliases
+ * go through resolveRecipient + user lookup. Returns null when unresolvable.
+ */
+async function resolveRecipientAddress(to: string, callerUserId: string): Promise<string | null> {
+  const parsed = normalizeRecipientQuery(to);
+  if (parsed.kind === "address") {
+    return parsed.value;
   }
-  return Asset.native();
+  const recipient = await resolveRecipient(to, callerUserId);
+  if (!recipient) {
+    return null;
+  }
+  const user = await prisma.user.findUnique({
+    where: { id: recipient.userId },
+    select: { stellarAddress: true },
+  });
+  return user?.stellarAddress ?? null;
 }
 
 /**
@@ -67,14 +79,13 @@ export async function createTransfer(
   params: CreateTransferParams,
   options?: CreateTransferOptions,
 ): Promise<CreateTransferResult> {
-  const { senderUserId, to } = params;
+  const { senderUserId, to, idempotencyKey } = params;
   const amount = params.amountAcbu.trim();
   // Reject scientific notation and enforce up to 7 decimal places (Stellar max precision)
   if (!amount || !/^\d+(\.\d{1,7})?$/.test(amount) || Number(amount) <= 0) {
-    throw new Error(
-      "amount_acbu must be a positive number with up to 7 decimal places",
-    );
+    throw new Error("amount_acbu must be a positive number with up to 7 decimal places");
   }
+  const amountInSmallestUnit = amountToSmallestUnit(amount);
 
   const sender = await prisma.user.findUnique({
     where: { id: senderUserId },
@@ -87,10 +98,31 @@ export async function createTransfer(
     throw new Error("KYC required to make payments. Complete verification first.");
   }
 
-  const recipientAddress = await resolveRecipientToStellarAddress(
-    to,
-    senderUserId,
-  );
+  if (idempotencyKey) {
+    const existingTransfer = await prisma.transaction.findFirst({
+      where: {
+        idempotencyKey,
+        userId: senderUserId,
+        type: "transfer",
+      },
+    });
+    if (existingTransfer) {
+      return {
+        transactionId: existingTransfer.id,
+        status: existingTransfer.status,
+      };
+    }
+  }
+
+  await reserveWalletVersion(senderUserId, options?.ifMatch);
+
+  const balanceSnapshot = await fetchWalletBalance(senderUserId);
+  const balanceInSmallestUnit = amountToSmallestUnit(balanceSnapshot.snapshot.balance || "0");
+  if (balanceInSmallestUnit < amountInSmallestUnit) {
+    throw new Error("Insufficient balance");
+  }
+
+  const recipientAddress = await resolveRecipientAddress(to, senderUserId);
   if (!recipientAddress) {
     throw new Error("Recipient not found or not available");
   }
@@ -100,25 +132,49 @@ export async function createTransfer(
     throw new Error("Cannot transfer to yourself");
   }
 
-  const tx = await prisma.transaction.create({
-    data: {
-      userId: senderUserId,
-      type: "transfer",
-      status: "pending",
-      recipientAddress,
-      acbuAmount: new Decimal(amount),
-    },
-  });
+  let tx;
+  try {
+    tx = await prisma.transaction.create({
+      data: {
+        userId: senderUserId,
+        type: "transfer",
+        status: "pending",
+        recipientAddress,
+        acbuAmount: amount,
+        idempotencyKey: idempotencyKey ?? undefined,
+      },
+    });
+  } catch (createError) {
+    if (
+      idempotencyKey &&
+      createError instanceof Prisma.PrismaClientKnownRequestError &&
+      createError.code === "P2002"
+    ) {
+      const existingTransfer = await prisma.transaction.findFirst({
+        where: {
+          idempotencyKey,
+          userId: senderUserId,
+          type: "transfer",
+        },
+      });
+      if (existingTransfer) {
+        return {
+          transactionId: existingTransfer.id,
+          status: existingTransfer.status,
+        };
+      }
+    }
+    throw createError;
+  }
 
   const correlationId = options?.correlationId ?? crypto.randomUUID();
-  const amountInSmallestUnit = Math.round(Number(amount) * 100);
 
   // Emit transfer.initiated immediately after the Transaction row is created
   logFinancialEvent({
     event: "transfer.initiated",
     status: "pending",
     transactionId: tx.id,
-    idempotencyKey: tx.id,
+    idempotencyKey: idempotencyKey ?? tx.id,
     userId: senderUserId,
     accountId: sender.stellarAddress ?? senderUserId,
     destinationId: recipientAddress,
@@ -167,12 +223,7 @@ export async function createTransfer(
     if (secretKey) {
       try {
         const asset = getAcbuAsset();
-        blockchainTxHash = await submitStellarPayment(
-          secretKey,
-          recipientAddress,
-          amount,
-          asset,
-        );
+        blockchainTxHash = await submitStellarPayment(secretKey, recipientAddress, amount, asset);
         status = "completed";
         await prisma.transaction.update({
           where: { id: tx.id },

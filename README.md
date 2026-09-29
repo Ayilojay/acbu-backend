@@ -24,7 +24,6 @@ Backend API server for the ACBU (African Currency Basket Unit) platform.
 ### 1. Clone and Install
 
 ```bash
-cd backend
 pnpm install
 ```
 
@@ -43,6 +42,21 @@ Edit `.env` and configure:
 - API keys for fintech partners (Flutterwave, etc.)
 - JWT secrets
 - Other service configurations
+
+### Database URL Matrix
+
+Two separate environment variables serve distinct purposes — using the wrong one for the wrong purpose causes silent failures or boot errors.
+
+| Variable | Protocol | Used by | Must NOT be used for |
+|---|---|---|---|
+| `DATABASE_URL` | `postgresql://` or `postgres://` | `prisma migrate` (schema migrations) | Runtime app server; Prisma Accelerate |
+| `PRISMA_ACCELERATE_URL` | `prisma://` or `prisma+postgres://` | App server at runtime (connection pooling, caching) | Migrations (`prisma migrate` will fail with this URL) |
+
+**Rules:**
+- `DATABASE_URL` must always be a **direct** PostgreSQL connection string. The server asserts this at boot and will refuse to start if it detects a `prisma://` protocol here.
+- `PRISMA_ACCELERATE_URL` is optional. When set, the app uses it for all runtime queries. When absent, the app falls back to `DATABASE_URL` directly (suitable for local dev).
+- Never run `pnpm prisma:migrate` pointing at `PRISMA_ACCELERATE_URL`. Always run migrations against the direct `DATABASE_URL`.
+- The boot log prints which URL type is active: `Runtime connection: Prisma Accelerate (pooled)` or `Runtime connection: direct PostgreSQL`.
 
 ### 3. Message queue and optional local services
 
@@ -79,7 +93,7 @@ pnpm prisma:seed
 pnpm dev
 ```
 
-The server will start on `http://localhost:3000` (or the port specified in `.env`).
+The server will start on `http://localhost:5000` (or the port specified in `.env`).
 
 Nodemon will automatically restart the server when you make changes to the code.
 
@@ -97,6 +111,8 @@ Nodemon will automatically restart the server when you make changes to the code.
 - `pnpm prisma:migrate` - Run database migrations
 - `pnpm prisma:studio` - Open Prisma Studio
 - `pnpm prisma:seed` - Seed database with initial data
+- `pnpm changelog` - Regenerate the full CHANGELOG.md from all git history
+- `pnpm changelog:update` - Append the latest unreleased changes to CHANGELOG.md (after tagging a release)
 
 ## Project Structure
 
@@ -121,9 +137,9 @@ backend/
 ## API Documentation
 
 Once the server is running, API documentation is available at:
-- Swagger UI: `http://localhost:3000/api-docs` (development only, disabled in production for security)
+- Swagger UI: `http://localhost:5000/api-docs` (development only, disabled in production for security)
 
-**Segment routes** (require API key with segment scope): `/v1/p2p`, `/v1/sme`, `/v1/international`, `/v1/salary`, `/v1/enterprise`, `/v1/savings`, `/v1/lending`, `/v1/gateway`, `/v1/bills`. For a full list of routes and smart contracts, see the repo docs: [API and Contracts Reference](../DOCS/API_AND_CONTRACTS_REFERENCE.MD).
+**Segment routes** (require API key with segment scope): `/v1/p2p`, `/v1/sme`, `/v1/international`, `/v1/salary`, `/v1/enterprise`, `/v1/savings`, `/v1/lending`, `/v1/gateway`, `/v1/bills`. For a full list of routes and smart contracts, see the repository docs in the `docs/` folder.
 
 ## Database Management
 
@@ -159,9 +175,9 @@ pnpm test:coverage
 
 ## Environment Variables
 
-**Full list:** See [ENV_VARS.md](ENV_VARS.md). No mock data; all values must be real or explicitly empty.
+**Full list:** See [ENV_VARS.md](./ENV_VARS.md). No mock data; all values must be real or explicitly empty.
 
-**Required:** `DATABASE_URL` (migrations / fallback), `MONGODB_URI` (MongoDB Atlas), `RABBITMQ_URL`, `JWT_SECRET`. Runtime DB: **Prisma Accelerate** via `PRISMA_ACCELERATE_URL` (see [ENV_VARS.md](ENV_VARS.md)).
+**Required:** `DATABASE_URL` (migrations / fallback), `MONGODB_URI` (MongoDB Atlas), `RABBITMQ_URL`, `JWT_SECRET`. Runtime DB: **Prisma Accelerate** via `PRISMA_ACCELERATE_URL` (see [ENV_VARS.md](./ENV_VARS.md)).
 
 **Fintech:** Flutterwave (`FLUTTERWAVE_SECRET_KEY`, etc.), Paystack (`PAYSTACK_SECRET_KEY`), MTN MoMo (`MTN_MOMO_SUBSCRIPTION_KEY`, `MTN_MOMO_API_USER_ID`, `MTN_MOMO_API_KEY`). Optional: `FINTECH_CURRENCY_PROVIDERS`.
 
@@ -211,6 +227,7 @@ The API provides three health check endpoints with different purposes:
 - **Status:** Returns `200` if all dependencies up, `503` if any down
 - **Purpose:** For Kubernetes readinessProbe configurations
 - **Probes:** PostgreSQL, MongoDB, RabbitMQ
+- **Startup Guard:** Returns `503` during application startup until all infrastructure connections and background jobs are fully initialized, preventing load balancers from routing traffic to partially-initialized instances
 - **Recommendation:** Use this endpoint in K8s deployment readinessProbe
 
 ### `/health/deep` - Deep Health Check
@@ -218,6 +235,7 @@ The API provides three health check endpoints with different purposes:
 - **Status:** Returns `200` if all dependencies up, `503` if any down
 - **Purpose:** Detailed dependency status for monitoring dashboards
 - **Response:** Full report with status of each dependency
+- **Startup Guard:** Returns `503` during application startup until all infrastructure connections and background jobs are fully initialized
 
 ### Kubernetes Configuration Example
 
@@ -244,14 +262,20 @@ livenessProbe:
 ## CI/CD
 
 GitHub Actions CI pipeline runs on:
-- Push to `main` or `develop` branches
-- Pull requests to `main` or `develop`
+- Push to `main`, `dev`, or `develop` branches
+- Pull requests to `main`, `dev`, or `develop`
 
 The CI pipeline:
 - Runs linter and formatter checks
 - Runs all tests
 - Builds the project
 - Validates database migrations
+- Blocks destructive Prisma migrations unless the pull request carries the `allow-destructive-migration` label
+
+## Recent Changes
+
+### Features
+- **Transfer service** (b6b7036): Implemented `createTransfer` in `transferService.ts` with input validation, KYC checks, and blockchain transaction handling, along with full unit test coverage in `tests/transfer.test.ts`
 
 ## Contributing
 
@@ -259,7 +283,7 @@ The CI pipeline:
 2. Make your changes
 3. Run tests and linter: `pnpm test && pnpm lint`
 4. Commit and push
-5. Create a pull request
+5. Create a pull request (prefer relative references like `#123` instead of hardcoded `github.com/<owner>/...` links)
 
 ## License
 

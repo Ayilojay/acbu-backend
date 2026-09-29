@@ -1,0 +1,16 @@
+# Default reviewers for repository changes
+# See https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Backend source and configuration
+/src/ @Pi-Defi-world/backend-team
+/.github/ @Pi-Defi-world/backend-team
+/package.json @Pi-Defi-world/backend-team
+/tsconfig.json @Pi-Defi-world/backend-team
+/.eslintrc.json @Pi-Defi-world/backend-team
+/.prettierrc @Pi-Defi-world/backend-team
+
+# Security-sensitive files
+/prisma/** @Pi-Defi-world/security-team
+/src/services/** @Pi-Defi-world/security-team
+/src/controllers/** @Pi-Defi-world/security-team
+/src/routes/** @Pi-Defi-world/security-team

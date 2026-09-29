@@ -1,11 +1,30 @@
 import { prisma } from "../config/database";
 import { triggerSchedule } from "../services/salary/salaryService";
 import { logger } from "../config/logger";
+import { acquireJobLock, releaseJobLock } from "../utils/jobLock";
+import { retryWithBackoff } from "../utils/retry";
+
+const JOB_NAME = "salary-schedule";
+const LOCK_TTL_S = 55; // hold for up to 55s (< 60s interval)
 
 /**
  * Checks for and processes due salary schedules.
+ * Guarded by a distributed MongoDB lock so only one instance runs per tick (#418).
  */
 export async function processSalarySchedules(): Promise<void> {
+  const acquired = await acquireJobLock(JOB_NAME, LOCK_TTL_S);
+  if (!acquired) {
+    logger.debug("Salary schedule job skipped — another instance holds the lock");
+    return;
+  }
+  try {
+    await _processSalarySchedules();
+  } finally {
+    await releaseJobLock(JOB_NAME);
+  }
+}
+
+async function _processSalarySchedules(): Promise<void> {
   const now = new Date();
 
   const dueSchedules = await prisma.salarySchedule.findMany({
@@ -22,10 +41,20 @@ export async function processSalarySchedules(): Promise<void> {
 
   for (const schedule of dueSchedules) {
     try {
-      await triggerSchedule(schedule.id);
+      await retryWithBackoff(() => triggerSchedule(schedule.id), {
+        attempts: 3,
+        initialDelayMs: 250,
+        onRetry: (error, attempt, delayMs) =>
+          logger.warn("Retrying salary schedule trigger", {
+            scheduleId: schedule.id,
+            attempt,
+            delayMs,
+            error,
+          }),
+      });
       logger.info("Triggered salary schedule", { scheduleId: schedule.id });
     } catch (err) {
-      logger.error("Failed to trigger salary schedule", {
+      logger.error("Failed to trigger salary schedule after retries", {
         scheduleId: schedule.id,
         error: err,
       });

@@ -1,10 +1,6 @@
 import { startAuditConsumer } from "./auditConsumer";
 import { prisma } from "../config/database";
-import {
-  getRabbitMQChannel,
-  QUEUES,
-  assertQueueWithDLQ,
-} from "../config/rabbitmq";
+import { getRabbitMQChannel, QUEUES, assertQueueWithDLQ } from "../config/rabbitmq";
 
 jest.mock("../config/database", () => ({
   prisma: {
@@ -35,6 +31,7 @@ describe("AuditConsumer", () => {
     consume: jest.fn(),
     ack: jest.fn(),
     nack: jest.fn(),
+    prefetch: jest.fn(),
   };
 
   const entry = {
@@ -78,9 +75,7 @@ describe("AuditConsumer", () => {
   });
 
   it("should retry on database failure and eventually nack to DLQ", async () => {
-    (prisma.auditTrail.create as jest.Mock).mockRejectedValue(
-      new Error("DB connection failed"),
-    );
+    (prisma.auditTrail.create as jest.Mock).mockRejectedValue(new Error("DB connection failed"));
     // Fast forward timers for retry
     jest.useFakeTimers();
 

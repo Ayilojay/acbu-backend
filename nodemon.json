@@ -1,6 +1,6 @@
 {
-  "watch": ["src"],
-  "ext": "ts,json",
+  "watch": ["src", "prisma", "config"],
+  "ext": "ts,json,prisma,yaml,yml",
   "ignore": ["src/**/*.spec.ts", "src/**/*.test.ts"],
   "exec": "ts-node src/index.ts",
   "env": {

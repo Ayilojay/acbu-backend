@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import Papa from "papaparse";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../config/database";
 import { config } from "../config/env";
 import { logger } from "../config/logger";
@@ -45,19 +45,50 @@ function deriveIdempotencyKey(
     .digest("hex");
 }
 
-function parseCsvBuffer(buffer: Buffer): { headers: string[]; rows: Record<string, string>[] } {
-  const text = buffer.toString("utf8").replace(/^\uFEFF/, "");
-  const parsed = Papa.parse<Record<string, string>>(text, {
-    header: true,
-    skipEmptyLines: true,
-    dynamicTyping: false,
-  });
+function parseCsvLine(line: string): string[] {
+  const values: string[] = [];
+  let current = "";
+  let inQuotes = false;
 
-  if (parsed.errors.length > 0) {
-    throw new AppError(parsed.errors[0]?.message || "CSV parsing failed", 400);
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    const next = line[i + 1];
+
+    if (char === '"') {
+      if (inQuotes && next === '"') {
+        current += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === "," && !inQuotes) {
+      values.push(current);
+      current = "";
+      continue;
+    }
+
+    current += char;
   }
 
-  const headers = (parsed.meta.fields ?? []).map((header) => header.trim());
+  values.push(current);
+  return values;
+}
+
+function parseCsvBuffer(buffer: Buffer): { headers: string[]; rows: Record<string, string>[] } {
+  const text = buffer.toString("utf8").replace(/^\uFEFF/, "");
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0);
+
+  if (lines.length === 0) {
+    throw new AppError("CSV file is empty or has no headers", 400);
+  }
+
+  const headers = parseCsvLine(lines[0]).map((header) => header.trim());
   if (headers.length === 0) {
     throw new AppError("CSV file is empty or has no headers", 400);
   }
@@ -66,13 +97,17 @@ function parseCsvBuffer(buffer: Buffer): { headers: string[]; rows: Record<strin
   const missing = required.filter((header) => !headers.includes(header));
 
   if (missing.length > 0) {
-    throw new AppError(
-      `CSV missing required headers: ${missing.join(", ")}`,
-      400,
-    );
+    throw new AppError(`CSV missing required headers: ${missing.join(", ")}`, 400);
   }
 
-  return { headers, rows: parsed.data as Record<string, string>[] };
+  const rows = lines.slice(1).map((line) => {
+    const values = parseCsvLine(line);
+    return Object.fromEntries(
+      headers.map((header, index) => [header, (values[index] ?? "").trim()]),
+    ) as Record<string, string>;
+  });
+
+  return { headers, rows };
 }
 
 async function processRow(
@@ -231,12 +266,7 @@ export async function processBulkTransfer(
         }
 
         results.push(
-          await processRow(
-            params.organizationId,
-            params.senderUserId,
-            validation.data,
-            start + i,
-          ),
+          await processRow(params.organizationId, params.senderUserId, validation.data, start + i),
         );
       }
       return results;
@@ -265,7 +295,7 @@ export async function processBulkTransfer(
       completedAt: new Date(),
       successCount,
       failureCount,
-      failureReport,
+      failureReport: failureReport as unknown as Prisma.InputJsonValue,
     },
   });
 
@@ -307,6 +337,6 @@ export async function getBulkTransferJob(jobId: string, organizationId: string) 
     status: job.status as BulkTransferJobStatus,
     createdAt: job.createdAt.toISOString(),
     completedAt: job.completedAt?.toISOString(),
-    failureReport: (job.failureReport as BulkTransferRowResult[]) ?? [],
+    failureReport: (job.failureReport as unknown as BulkTransferRowResult[]) ?? [],
   };
 }

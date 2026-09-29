@@ -5,11 +5,6 @@ import {
   deleteMe,
   getReceive,
   getReceiveQrcode,
-  getMeBalance,
-  postWalletConfirm,
-  postWalletActivate,
-  putWalletAddress,
-  deleteWallet,
   postContacts,
   getContacts,
   deleteContact,
@@ -17,6 +12,14 @@ import {
   getGuardians,
   deleteGuardian,
 } from "../controllers/userController";
+import {
+  getWallet,
+  getMeBalance,
+  postWalletConfirm,
+  postWalletActivate,
+  putWalletAddress,
+  deleteWallet,
+} from "../controllers/walletController";
 import { validateApiKey } from "../middleware/auth";
 import { apiKeyRateLimiter } from "../middleware/rateLimiter";
 
@@ -62,8 +65,10 @@ router.use(apiKeyRateLimiter);
  *               email:
  *                 type: string
  *                 format: email
+ *                 example: "user@example.com"
  *               phone_e164:
  *                 type: string
+ *                 example: "+15551234567"
  *               privacy_hide_from_search:
  *                 type: boolean
  *               passcode:
@@ -129,6 +134,21 @@ router.get("/me/receive/qrcode", getReceiveQrcode);
  *         description: Balances retrieved successfully
  */
 router.get("/me/balance", getMeBalance);
+
+/**
+ * @swagger
+ * /v1/users/me/wallet:
+ *   get:
+ *     tags:
+ *       - Users
+ *     summary: Get wallet state with ETag
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: Wallet state retrieved successfully
+ */
+router.get("/me/wallet", getWallet);
 
 /**
  * @swagger
@@ -303,8 +323,10 @@ router.delete("/me/contacts/:id", deleteContact);
  *               guardian_email:
  *                 type: string
  *                 format: email
+ *                 example: "guardian@example.com"
  *               guardian_phone:
  *                 type: string
+ *                 example: "+15551234567"
  *     responses:
  *       201:
  *         description: Guardian added successfully

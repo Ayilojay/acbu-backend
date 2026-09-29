@@ -1,9 +1,13 @@
 import { prisma } from "../../config/database";
+import { Prisma } from "@prisma/client";
 import { getMongoDB } from "../../config/mongodb";
 import { getRabbitMQChannel } from "../../config/rabbitmq";
 import { logger } from "../../config/logger";
+import { eventListenerHealth } from "../stellar/eventListener";
+import { stellarClient } from "../stellar/client";
 
 const TIMEOUT_MS = 2000;
+let startupComplete = false;
 
 type DependencyStatus = "up" | "down";
 
@@ -20,6 +24,8 @@ export interface HealthReport {
     postgres: HealthDetail;
     mongodb: HealthDetail;
     rabbitmq: HealthDetail;
+    sorobanEventListener: HealthDetail;
+    stellarHorizon: HealthDetail;
   };
 }
 
@@ -34,7 +40,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 
 async function checkPostgres(): Promise<HealthDetail> {
   try {
-    await withTimeout(prisma.$queryRaw`SELECT 1`, TIMEOUT_MS);
+    await withTimeout(prisma.$queryRaw(Prisma.sql`SELECT 1`), TIMEOUT_MS);
     return { status: "up" };
   } catch (err) {
     const message = (err as Error).message;
@@ -57,10 +63,7 @@ async function checkMongoDB(): Promise<HealthDetail> {
 
 async function checkRabbitMQ(): Promise<HealthDetail> {
   try {
-    // getRabbitMQChannel throws if not connected; opening a temp channel
-    // confirms the broker is alive without side effects.
     const ch = getRabbitMQChannel();
-    // A no-op check: if the channel object exists the connection is live.
     if (!ch) throw new Error("Channel not available");
     return { status: "up" };
   } catch (err) {
@@ -70,22 +73,48 @@ async function checkRabbitMQ(): Promise<HealthDetail> {
   }
 }
 
+async function checkStellarHorizon(): Promise<HealthDetail> {
+  try {
+    await withTimeout(stellarClient.getServer().root(), TIMEOUT_MS);
+    return { status: "up" };
+  } catch (err) {
+    const message = (err as Error).message;
+    logger.error("Health check: Stellar Horizon unavailable", { error: message });
+    return { status: "down", error: "Stellar Horizon unreachable" };
+  }
+}
+
 export async function getHealthReport(): Promise<HealthReport> {
-  const [postgres, mongodb, rabbitmq] = await Promise.all([
+  const [postgres, mongodb, rabbitmq, stellarHorizon] = await Promise.all([
     checkPostgres(),
     checkMongoDB(),
     checkRabbitMQ(),
+    checkStellarHorizon(),
   ]);
+
+  const sorobanEventListener: HealthDetail = {
+    status: eventListenerHealth.status,
+    error: eventListenerHealth.lastError ?? undefined,
+  };
 
   const allUp =
     postgres.status === "up" &&
     mongodb.status === "up" &&
-    rabbitmq.status === "up";
+    rabbitmq.status === "up" &&
+    stellarHorizon.status === "up" &&
+    sorobanEventListener.status === "up";
+
+  const status = allUp && startupComplete ? "up" : "down";
 
   return {
-    status: allUp ? "up" : "down",
+    status,
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    details: { postgres, mongodb, rabbitmq },
+    details: { postgres, mongodb, rabbitmq, stellarHorizon, sorobanEventListener },
   };
+}
+
+export function markStartupComplete(): void {
+  startupComplete = true;
+  logger.info("Application startup complete - health check now reporting healthy");
 }

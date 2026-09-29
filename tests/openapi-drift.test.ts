@@ -1,23 +1,35 @@
-import { swaggerSpec } from "../src/config/swagger";
+import fs from "fs";
+import path from "path";
 import { zodToJsonSchema } from "zod-to-json-schema";
-import { routeSchemas } from "../src/controllers/schemas";
+import { routeSchemas } from "../src/controllers/route-schemas";
+import OpenAPISchemaValidator from "openapi-schema-validator";
 
+const swaggerDocumentPath = path.resolve(__dirname, "../swagger.json");
+const swaggerDocument = JSON.parse(fs.readFileSync(swaggerDocumentPath, "utf8"));
 
 describe("OpenAPI Drift vs Implementation", () => {
-  const paths = (swaggerSpec as any).paths || {};
+  const paths = swaggerDocument.paths || {};
+  const schemaRegistry = routeSchemas as Record<string, any>;
   const errors: string[] = [];
 
   // Helper to normalize path for comparison
-  const normalizePath = (path: string) => path.replace(/\/$/, "");
+  const normalizePath = (p: string) => p.replace(/\/$/, "");
 
   /**
    * CHECK 1: Every route in routeSchemas must be documented in Swagger
    */
+  it("should validate swagger.json against the OpenAPI 3.0 schema", () => {
+    const validator = new OpenAPISchemaValidator({ version: 3 });
+    const result = validator.validate(swaggerDocument);
+
+    expect(result.errors).toEqual([]);
+  });
+
   it("should ensure all registered route schemas are documented in OpenAPI", () => {
-    for (const routeKey of Object.keys(routeSchemas)) {
-      const [method, path] = routeKey.split(" ");
-      const normalizedPath = normalizePath(path);
-      
+    for (const routeKey of Object.keys(schemaRegistry)) {
+      const [method, routePath] = routeKey.split(" ");
+      const normalizedPath = normalizePath(routePath);
+
       const swaggerPath = paths[normalizedPath];
       if (!swaggerPath) {
         errors.push(`[MISSING PATH] ${routeKey}: Path not found in OpenAPI documentation`);
@@ -28,6 +40,10 @@ describe("OpenAPI Drift vs Implementation", () => {
       if (!operation) {
         errors.push(`[MISSING METHOD] ${routeKey}: Method ${method} not found for path ${normalizedPath} in OpenAPI`);
       }
+    }
+
+    if (errors.length > 0) {
+      throw new Error("OpenAPI Drift Detected:\n" + errors.join("\n"));
     }
   });
 
@@ -40,7 +56,7 @@ describe("OpenAPI Drift vs Implementation", () => {
 
       for (const method of Object.keys(methods as any)) {
         const routeKey = `${method.toUpperCase()} ${pathStr}`;
-        if (!routeSchemas[routeKey]) {
+        if (!schemaRegistry[routeKey]) {
           // We don't necessarily fail on this, but it's a good practice to register all routes
           console.warn(`[WARNING] ${routeKey}: Documented in OpenAPI but missing from routeSchemas registry`);
         }
@@ -52,9 +68,9 @@ describe("OpenAPI Drift vs Implementation", () => {
    * CHECK 3: Schema field matching
    */
   it("should ensure OpenAPI documentation and Zod schemas match exactly", () => {
-    for (const [routeKey, zodSchema] of Object.entries(routeSchemas)) {
-      const [method, path] = routeKey.split(" ");
-      const normalizedPath = normalizePath(path);
+    for (const [routeKey, zodSchema] of Object.entries(schemaRegistry)) {
+      const [method, routePath] = routeKey.split(" ");
+      const normalizedPath = normalizePath(routePath);
       const swaggerPath = paths[normalizedPath];
       if (!swaggerPath) continue;
 
@@ -64,7 +80,7 @@ describe("OpenAPI Drift vs Implementation", () => {
       // Convert Zod schema to JSON schema
       let jsonSchema: any;
       try {
-        jsonSchema = zodToJsonSchema(zodSchema);
+        jsonSchema = zodToJsonSchema(zodSchema as any);
       } catch (e) {
         errors.push(`[ERROR] ${routeKey}: Failed to convert Zod schema to JSON: ${(e as Error).message}`);
         continue;
@@ -123,7 +139,7 @@ describe("OpenAPI Drift vs Implementation", () => {
       if (method === "GET") {
         const swaggerParams = operation.parameters || [];
         const queryParams = swaggerParams.filter((p: any) => p.in === "query");
-        
+
         for (const propName of Object.keys(zodProperties)) {
           const param = queryParams.find((p: any) => p.name === propName);
           if (!param) {
@@ -148,6 +164,7 @@ describe("OpenAPI Drift vs Implementation", () => {
    * CHECK 4: Metadata (Summary/Responses)
    */
   it("should ensure all documented routes have basic metadata", () => {
+    const metaErrors: string[] = [];
     for (const [pathStr, methods] of Object.entries(paths)) {
       if (!pathStr.startsWith("/v1/")) continue;
 
@@ -159,14 +176,13 @@ describe("OpenAPI Drift vs Implementation", () => {
           console.warn(`[DOCS] ${routeKey}: Missing summary`);
         }
         if (!op.responses || Object.keys(op.responses).length === 0) {
-          errors.push(`[DOCS] ${routeKey}: Missing responses`);
+          metaErrors.push(`[DOCS] ${routeKey}: Missing responses`);
         }
       }
     }
-    
-    if (errors.length > 0) {
-      // Re-throw if there are critical missing docs (responses)
-      // throw new Error("Missing critical documentation:\n" + errors.join("\n"));
+
+    if (metaErrors.length > 0) {
+      throw new Error("Missing critical documentation:\n" + metaErrors.join("\n"));
     }
   });
 });
