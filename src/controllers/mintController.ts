@@ -251,9 +251,10 @@ export async function mintFromUsdcInternal(
           walletAddress,
           acbuAmount: acbuDecimal.toString(),
           blockchainTxHash: result.transactionHash,
-          compensationError: compensationError instanceof Error
-            ? compensationError.message
-            : String(compensationError),
+          compensationError:
+            compensationError instanceof Error
+              ? compensationError.message
+              : String(compensationError),
         });
       }
 
@@ -412,8 +413,7 @@ export async function depositFromBasketCurrency(
     // key — the second user would receive a 202 referencing the first user's
     // transaction (status/existence disclosure) and their own deposit would
     // be blocked.
-    const rawIdempotencyKey =
-      extractIdempotencyKey(req) ?? fintech_tx_id ?? undefined;
+    const rawIdempotencyKey = extractIdempotencyKey(req) ?? fintech_tx_id ?? undefined;
     const idempotencyKey = rawIdempotencyKey
       ? scopeIdempotencyKey(userId, rawIdempotencyKey)
       : undefined;
@@ -556,8 +556,7 @@ export async function depositFromBasketCurrency(
       amount: amountDecimal.toString(),
       wallet_address: wallet_address ? "***" : undefined,
       status: "completed",
-      message:
-        "Deposit received and ACBU has been minted to the wallet.",
+      message: "Deposit received and ACBU has been minted to the wallet.",
     });
   } catch (error) {
     next(error);
