@@ -14,6 +14,7 @@ import { signChallengeToken, verifyChallengeToken, revokeJti } from "../../utils
 import { logger } from "../../config/logger";
 import { getRabbitMQChannel } from "../../config/rabbitmq";
 import { generateId } from "../../utils/idGenerator";
+import { generateSecureOtp } from "../../utils/secureOtp";
 import { QUEUES } from "../../config/rabbitmq";
 import { ensureWalletForUser } from "../wallet/walletService";
 import { logAudit } from "../audit";
@@ -151,10 +152,6 @@ function normalizeIdentifier(s: string): {
     return { kind: "email", value: lower };
   }
   return { kind: "username", value: lower.replace(/\s/g, "") };
-}
-
-function generateOtpCode(): string {
-  return String(Math.floor(100000 + Math.random() * 900000));
 }
 
 function isAdminTierUser(tier: string | null | undefined): boolean {
@@ -404,7 +401,7 @@ export async function signin(params: SigninParams): Promise<SigninResult> {
       });
       const to = user.twoFaMethod === "email" ? u?.email : u?.phoneE164;
       if (!to) throw new TwoFactorChannelNotConfiguredError();
-      const code = generateOtpCode();
+      const code = generateSecureOtp();
       const codeHash = await bcrypt.hash(code, 10);
       await prisma.otpChallenge.create({
         data: {
@@ -650,7 +647,7 @@ export async function requestAdminMfaChallenge(
     if (!to) {
       throw new TwoFactorChannelNotConfiguredError();
     }
-    const code = generateOtpCode();
+    const code = generateSecureOtp();
     const codeHash = await bcrypt.hash(code, 10);
     await prisma.otpChallenge.create({
       data: {
