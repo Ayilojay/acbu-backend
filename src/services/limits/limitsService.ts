@@ -35,6 +35,45 @@ function buildActorWhere(userId: string | null, organizationId: string | null) {
 }
 
 /**
+ * Sum the USD-equivalent value of deposits for the given actor since `since`.
+ *
+ * USDC deposits store their value in `usdcAmount`. Basket-currency deposits
+ * (NGN/etc.) store `usdcAmount = null` and instead carry their USD-equivalent
+ * value in `amountUsd`. Both must be counted so the deposit cap cannot be
+ * bypassed by funding through non-USDC rails.
+ */
+async function sumDepositsUsdSince(
+  since: Date,
+  whereActor: ReturnType<typeof buildActorWhere>,
+): Promise<Decimal> {
+  const [usdcAgg, basketAgg] = await Promise.all([
+    prisma.transaction.aggregate({
+      where: {
+        type: "mint",
+        status: { in: ["pending", "processing", "completed"] },
+        createdAt: { gte: since },
+        ...whereActor,
+      },
+      _sum: { usdcAmount: true },
+    }),
+    prisma.transaction.aggregate({
+      where: {
+        type: "mint",
+        status: { in: ["pending", "processing", "completed"] },
+        createdAt: { gte: since },
+        usdcAmount: null,
+        ...whereActor,
+      },
+      _sum: { amountUsd: true },
+    }),
+  ]);
+
+  return new Decimal(usdcAgg._sum.usdcAmount ?? 0).plus(
+    new Decimal(basketAgg._sum.amountUsd ?? 0),
+  );
+}
+
+/**
  * Check deposit limits for the given actor (userId or organizationId) and audience.
  * Throws AppError if limit exceeded.
  */
@@ -50,29 +89,16 @@ export async function checkDepositLimits(
   const startOfMonth = getStartOfZonedMonth(now);
 
   const whereActor = buildActorWhere(userId, organizationId);
-  const mintedDaily = await prisma.transaction.aggregate({
-    where: {
-      type: "mint",
-      status: { in: ["pending", "processing", "completed"] },
-      createdAt: { gte: startOfDay },
-      ...whereActor,
-    },
-    _sum: { usdcAmount: true },
-  });
-  const mintedMonthly = await prisma.transaction.aggregate({
-    where: {
-      type: "mint",
-      status: { in: ["pending", "processing", "completed"] },
-      createdAt: { gte: startOfMonth },
-      ...whereActor,
-    },
-    _sum: { usdcAmount: true },
-  });
 
-  // For basket-currency deposits we may not have usdcAmount; use localAmount converted to USD if needed.
-  // Simplified: use amountUsd passed in (caller should pass USD equivalent).
-  const dailyUsd = new Decimal(mintedDaily._sum.usdcAmount ?? 0).plus(amountUsd);
-  const monthlyUsd = new Decimal(mintedMonthly._sum.usdcAmount ?? 0).plus(amountUsd);
+  // Include both USDC deposits (usdcAmount) and basket-currency deposits
+  // (usdcAmount = null, USD-equivalent in amountUsd) in the rolling aggregate.
+  const [mintedDailyUsd, mintedMonthlyUsd] = await Promise.all([
+    sumDepositsUsdSince(startOfDay, whereActor),
+    sumDepositsUsdSince(startOfMonth, whereActor),
+  ]);
+
+  const dailyUsd = mintedDailyUsd.plus(amountUsd);
+  const monthlyUsd = mintedMonthlyUsd.plus(amountUsd);
 
   if (dailyUsd.greaterThan(config.depositDailyUsd)) {
     throw new AppError(
