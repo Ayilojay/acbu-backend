@@ -18,6 +18,7 @@
   "scripts": {
     "dev": "nodemon",
     "build": "tsc -p tsconfig.build.json",
+    "type-check": "tsc --noEmit",
     "prestart": "pnpm run build",
     "start": "node dist/index.js",
     "lint": "ESLINT_USE_FLAT_CONFIG=false eslint src --ext .ts",
