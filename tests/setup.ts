@@ -35,3 +35,7 @@ process.env.USDC_ISSUER_MAINNET =
 // TESTNET_CUSTODIAL_BOOTSTRAP is not present in the test environment.
 process.env.TESTNET_CUSTODIAL_BOOTSTRAP =
   process.env.TESTNET_CUSTODIAL_BOOTSTRAP || "xlm";
+process.env.STELLAR_HORIZON_URL =
+  process.env.STELLAR_HORIZON_URL || "https://horizon-testnet.stellar.org";
+process.env.STELLAR_NETWORK = process.env.STELLAR_NETWORK || "testnet";
+
