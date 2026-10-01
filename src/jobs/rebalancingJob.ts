@@ -16,9 +16,7 @@ const LOCK_TTL_S = 23 * 60 * 60;
 
 function getNextMidnightUtc(): number {
   const now = new Date();
-  const next = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1),
-  );
+  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
   return next.getTime() - now.getTime();
 }
 
