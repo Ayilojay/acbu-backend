@@ -271,10 +271,10 @@ export class ReserveTracker {
       if (latestReserve) {
         currencyStatuses.push({
           currency,
-          targetWeight: latestReserve.targetWeight.toNumber(),
-          actualWeight: latestReserve.actualWeight.toNumber(),
-          reserveAmount: latestReserve.reserveAmount.toNumber(),
-          reserveValueUsd: latestReserve.reserveValueUsd.toNumber(),
+          targetWeight: Number(latestReserve.targetWeight.toString()),
+          actualWeight: Number(latestReserve.actualWeight.toString()),
+          reserveAmount: Number(latestReserve.reserveAmount.toString()),
+          reserveValueUsd: Number(latestReserve.reserveValueUsd.toString()),
           weightDrift:
             latestReserve.actualWeight.toNumber() - latestReserve.targetWeight.toNumber(),
         });
@@ -379,8 +379,8 @@ export class ReserveTracker {
       _sum: { acbuAmountBurned: true },
     });
 
-    const totalMinted = minted._sum.acbuAmount?.toNumber() || 0;
-    const totalBurned = burned._sum.acbuAmountBurned?.toNumber() || 0;
+    const totalMinted = minted._sum.acbuAmount ? Number(minted._sum.acbuAmount.toString()) : 0;
+    const totalBurned = burned._sum.acbuAmountBurned ? Number(burned._sum.acbuAmountBurned.toString()) : 0;
 
     return Math.max(0, totalMinted - totalBurned);
   }
@@ -448,7 +448,7 @@ export class ReserveTracker {
       });
 
       if (latest) {
-        total += latest.reserveValueUsd.toNumber();
+        total += Number(latest.reserveValueUsd.toString());
       }
     }
 
@@ -465,7 +465,7 @@ export class ReserveTracker {
     });
 
     if (latestRate) {
-      return latestRate.rateUsd.toNumber();
+      return Number(latestRate.rateUsd.toString());
     }
 
     throw new Error(`Oracle rate not available for ${currency}`);
