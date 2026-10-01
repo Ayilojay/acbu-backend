@@ -1,6 +1,7 @@
 import { MintingService } from "../src/services/contracts/acbuMinting.service";
 import { contractClient } from "../src/services/stellar/contractClient";
 import { stellarClient } from "../src/services/stellar/client";
+import { prisma } from "../src/config/database";
 
 jest.mock("../src/services/stellar/contractClient", () => ({
   contractClient: { invokeContract: jest.fn() },
@@ -11,12 +12,14 @@ jest.mock("../src/services/stellar/client", () => ({
   stellarClient: { getKeypair: jest.fn(() => ({ publicKey: () => "test-pub-key" })) },
 }));
 
-// Mock the shared database singleton — the one the service now imports.
-const mockTransactionUpdate = jest.fn();
 jest.mock("../src/config/database", () => ({
   prisma: {
-    transaction: { update: mockTransactionUpdate },
+    transaction: { update: jest.fn() },
   },
+}));
+
+jest.mock("../src/config/logger", () => ({
+  logger: { info: jest.fn(), error: jest.fn(), warn: jest.fn(), debug: jest.fn() },
 }));
 
 describe("MintingService Compensation", () => {
@@ -24,7 +27,7 @@ describe("MintingService Compensation", () => {
     jest.clearAllMocks();
   });
 
-  it("marks tx FAILED if stellar throws", async () => {
+  it("marks tx failed if stellar throws", async () => {
     const service = new MintingService("contract-id");
     (contractClient.invokeContract as jest.Mock).mockRejectedValue(new Error("Stellar Fail"));
 
@@ -37,9 +40,9 @@ describe("MintingService Compensation", () => {
       } as any),
     ).rejects.toThrow("Stellar Fail");
 
-    expect(mockTransactionUpdate).toHaveBeenCalledWith({
+    expect(prisma.transaction.update).toHaveBeenCalledWith({
       where: { id: "123" },
-      data: { status: "FAILED" },
+      data: { status: "failed" },
     });
   });
 });
