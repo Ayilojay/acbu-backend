@@ -82,8 +82,9 @@ export class SimulatedFintechProvider implements FintechProvider {
     // and deduct funds, then record it in the ledger.
     // For now, we'll just return a success result.
 
+    const crypto = require("crypto");
     return {
-      transactionId: `sim_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+      transactionId: `sim_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`,
       status: "completed",
     };
   }
