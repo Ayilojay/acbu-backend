@@ -15,6 +15,7 @@ import { logAudit } from "../audit";
 import bcrypt from "bcrypt";
 import { totp } from "otplib";
 import { getRabbitMQChannel, QUEUES } from "../../config/rabbitmq";
+import { generateSecureOtp } from "../../utils/secureOtp";
 
 jest.mock("../../config/database", () => ({
   prisma: {
@@ -82,6 +83,10 @@ jest.mock("../../config/rabbitmq", () => ({
   },
 }));
 
+jest.mock("../../utils/secureOtp", () => ({
+  generateSecureOtp: jest.fn().mockReturnValue("123456"),
+}));
+
 describe("authService privileged key coverage", () => {
   const mqChannel = {
     assertQueue: jest.fn().mockResolvedValue(undefined),
@@ -114,6 +119,7 @@ describe("authService privileged key coverage", () => {
 
     expect(out).toEqual({ challenge_token: "challenge-token", method: "sms" });
     expect(prisma.otpChallenge.create).toHaveBeenCalled();
+    expect(generateSecureOtp).toHaveBeenCalledTimes(1);
     expect(mqChannel.assertQueue).toHaveBeenCalledWith(QUEUES.OTP_SEND, { durable: true });
     expect(mqChannel.sendToQueue).toHaveBeenCalled();
     expect(logAudit).toHaveBeenCalledWith(
