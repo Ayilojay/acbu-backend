@@ -9,6 +9,7 @@ import { prisma } from "../../config/database";
 import { generateApiKey } from "../../middleware/auth";
 import { logger } from "../../config/logger";
 import { signChallengeToken, verifyChallengeToken, revokeJti } from "../../utils/jwt";
+import { generateSecureOtp } from "../../utils/secureOtp";
 import { getRabbitMQChannel, QUEUES } from "../../config/rabbitmq";
 import {
   verifyDevice,
@@ -140,10 +141,6 @@ export interface VerifyRecoveryOtpResult {
   user_id: string;
 }
 
-function generateOtpCode(): string {
-  return String(Math.floor(100000 + Math.random() * 900000));
-}
-
 async function publishOtpToQueue(payload: {
   channel: string;
   to: string;
@@ -266,7 +263,7 @@ export async function unlockApp(params: UnlockAppParams): Promise<UnlockAppResul
     throw new Error("Recovery channel not configured");
   }
 
-  const code = generateOtpCode();
+  const code = generateSecureOtp();
   const codeHash = await bcrypt.hash(code, 10);
   const otpChallenge = await prisma.otpChallenge.create({
     data: {
