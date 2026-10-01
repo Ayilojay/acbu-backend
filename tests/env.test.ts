@@ -267,4 +267,65 @@ describe("env validation", () => {
     const { config } = require("../src/config/env");
     expect(config.piiEncryptionKey).toBeUndefined();
   });
+
+  // AB-052 (#1002): the Stellar fee knobs were read by `config.stellar.*` but
+  // never declared in the Zod schema, so Zod stripped them and every consumer
+  // saw `undefined` — `getBaseFee()` returned the string "undefined" and the
+  // transaction builder threw "[BigNumber Error] Not a number: undefined".
+  // Declaring them here is what makes the documented defaults real.
+  describe("Stellar fee configuration (AB-052)", () => {
+    const FEE_VARS = [
+      "STELLAR_BASE_FEE_STROOPS",
+      "STELLAR_USE_DYNAMIC_FEES",
+      "STELLAR_SOROBAN_MIN_FEE_STROOPS",
+      "STELLAR_SOROBAN_MAX_FEE_STROOPS",
+      "STELLAR_FEE_SURGE_BUFFER_BPS",
+      "STELLAR_MAX_PAYMENT_FEE_STROOPS",
+    ];
+
+    it("exposes numeric fee defaults instead of undefined when unset", () => {
+      FEE_VARS.forEach((key) => delete process.env[key]);
+
+      const { config } = require("../src/config/env");
+      expect(config.stellar.baseFeeStroops).toBe(100);
+      expect(config.stellar.useDynamicFees).toBe(false);
+      expect(config.stellar.sorobanMinFeeStroops).toBe(5000);
+      expect(config.stellar.sorobanMaxFeeStroops).toBe(10_000_000);
+      expect(config.stellar.feeSurgeBufferBps).toBe(2000);
+      expect(config.stellar.maxPaymentFeeStroops).toBe(1_000_000);
+    });
+
+    it("coerces fee values supplied as env strings", () => {
+      process.env.STELLAR_BASE_FEE_STROOPS = "250";
+      process.env.STELLAR_FEE_SURGE_BUFFER_BPS = "5000";
+      process.env.STELLAR_MAX_PAYMENT_FEE_STROOPS = "250000";
+      process.env.STELLAR_USE_DYNAMIC_FEES = "true";
+
+      const { config } = require("../src/config/env");
+      expect(config.stellar.baseFeeStroops).toBe(250);
+      expect(config.stellar.feeSurgeBufferBps).toBe(5000);
+      expect(config.stellar.maxPaymentFeeStroops).toBe(250000);
+      expect(config.stellar.useDynamicFees).toBe(true);
+    });
+
+    it("rejects a non-positive base fee rather than silently pricing at zero", () => {
+      process.env.STELLAR_BASE_FEE_STROOPS = "0";
+      expect(() => require("../src/config/env")).toThrow(/STELLAR_BASE_FEE_STROOPS/);
+    });
+
+    it("rejects a negative surge buffer", () => {
+      process.env.STELLAR_FEE_SURGE_BUFFER_BPS = "-1";
+      expect(() => require("../src/config/env")).toThrow(/STELLAR_FEE_SURGE_BUFFER_BPS/);
+    });
+
+    it("rejects a surge buffer above 100%", () => {
+      process.env.STELLAR_FEE_SURGE_BUFFER_BPS = "10001";
+      expect(() => require("../src/config/env")).toThrow(/STELLAR_FEE_SURGE_BUFFER_BPS/);
+    });
+
+    it("rejects a non-boolean STELLAR_USE_DYNAMIC_FEES", () => {
+      process.env.STELLAR_USE_DYNAMIC_FEES = "yes-please";
+      expect(() => require("../src/config/env")).toThrow(/STELLAR_USE_DYNAMIC_FEES/);
+    });
+  });
 });
